@@ -1,0 +1,6 @@
+# Wokwi for VS Code: simulates the firmware built by PlatformIO (pio run)
+[wokwi]
+version = 1
+firmware = '.pio/build/esp32dev/firmware.bin'
+elf = '.pio/build/esp32dev/firmware.elf'
+rfc2217ServerPort = 4000   # exposes the simulated serial port to Python: rfc2217://localhost:4000
