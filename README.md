@@ -33,7 +33,83 @@ MPU6050 --I2C 400 kHz--> ESP32 --UART 115200, CSV--> host/live_plot.py --> plot 
                          complementary filter
 ```
 
-## Running
+## Getting Started (Mac or Windows, No Experience Needed)
+
+You do not need to know Python. Each step says exactly what to click or type; copying and pasting is fine.
+
+**1. Install Python (once per computer)**
+
+- **Mac:** open Terminal (press Cmd+Space, type `Terminal`, press Return). Type `python3 --version` and press Return.
+  - If it shows Python 3.9 or newer, go to step 2.
+  - If a box offers to install the "command line developer tools", click **Install**, wait for it to finish, and check again.
+  - Otherwise download the macOS installer from https://www.python.org/downloads/, open it, and click through.
+- **Windows:** download the installer from https://www.python.org/downloads/ and open it. On the first screen tick **Add python.exe to PATH**, then click **Install Now**.
+
+**2. Download this project**
+
+Click the green **Code** button at the top of this page, then **Download ZIP**. Unzip it: on a Mac double-click the ZIP in Downloads; on Windows right-click it, choose **Extract All**, then **Extract**. You now have a folder named `ESP32-IMU-Logger-main`.
+
+**3. Start it**
+
+- **Windows:** open the `ESP32-IMU-Logger-main` folder and double-click **start.bat**.
+- **Mac:** in Terminal type `cd ` (with a space after it), drag the `ESP32-IMU-Logger-main` folder from Finder into the Terminal window, and press Return. Then type `python3 start.py` and press Return.
+
+The first time, it sets itself up: it creates a private Python environment inside the project folder and downloads the libraries it needs. This takes a few minutes and needs internet. Then a menu appears. Type a number and press Enter:
+
+| Option | What it does | What you get |
+| --- | --- | --- |
+| 1 | Live plot with simulated data | No hardware needed. Shows accelerometer, gyro and fused tilt scrolling live and saves a log in `logs/`. Close the plot window to stop |
+| 2 | Live plot from a real ESP32 | With the board plugged in by USB and running the firmware (see Running with the Firmware). Finds the port automatically |
+| 3 | Live plot from the Wokwi simulator | With the simulator running in VS Code (see Running with the Firmware) |
+| 4 | List the serial ports | Shows every serial port and which one looks like the ESP32 |
+| 5 | Plot a recorded log | Plots a CSV from `logs/` (the newest by default) |
+| 6 | Regenerate the filter comparison figure | Rebuilds `figures/filter_comparison.png` and opens it |
+| 7 | Run the automated tests | Checks parsing, the filter math and port detection |
+
+To use it again later, repeat step 3; setup is skipped and the menu appears in a few seconds. Type `q` and press Enter to quit.
+
+**Troubleshooting**
+
+| Problem | Fix |
+| --- | --- |
+| Mac: `command not found: python3` | Install Python (step 1). |
+| Windows: `Python was not found`, or the Microsoft Store opens | Install Python from python.org (step 1) and tick **Add python.exe to PATH**. If you already installed it without that box, run the installer again, choose **Modify**, then **Next**, and tick **Add Python to environment variables**. |
+| Windows: "Windows protected your PC" when opening start.bat | Click **More info**, then **Run anyway**. The file only runs `py start.py`; you can open it in Notepad to check. |
+| `This project needs Python 3.9 or newer` | Install the current Python from https://www.python.org/downloads/ |
+| `Could not tell which port is the ESP32` | Use a USB **data** cable (some only charge). Install the USB driver for the chip printed next to the board's USB port: CP2102 or CP2104 uses the [Silicon Labs CP210x driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers); CH340 or CH9102 uses the CH340 driver ([install guide](https://learn.sparkfun.com/tutorials/how-to-install-ch340-drivers/all)). On a Mac, allow the driver under System Settings, Privacy and Security. Then pick option 4 to check. |
+| `Could not open` the port | Another program is using it. Close the Arduino IDE or PlatformIO serial monitor and try again. |
+| The plot window is blank | No data is arriving: check that the firmware is running and finished its 2 s calibration, and that the baud rate is 115200. |
+| `Installing libraries failed` or setup stops with an error | Check your internet connection, delete the `.venv` folder inside the project folder, and start again. (On a Mac the folder is hidden: press Cmd+Shift+. in Finder to show it.) |
+| A figure did not open by itself | Look in the project's `figures` folder. |
+
+**For developers.** `start.py` only creates `.venv`, installs `requirements.txt` and runs the commands below, so you can also work by hand (Python 3.9 or newer):
+
+```bash
+# macOS / Linux
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+```powershell
+# Windows (PowerShell or Command Prompt)
+py -m venv .venv
+.venv\Scripts\activate       # if PowerShell blocks this: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+pip install -r requirements.txt
+```
+
+```bash
+python -m host.live_plot --demo              # simulated data
+python -m host.live_plot --port auto         # real board (or --port COM3, --port /dev/cu.usbserial-0001)
+python -m host.live_plot --list-ports
+python -m pytest
+```
+
+`python start.py <shortcut>` runs one menu option directly (`python start.py --list` shows the shortcuts). CI runs the tests through `start.py` on macOS, Windows and Linux with Python 3.9 and 3.13.
+
+## Running with the Firmware
+
+The menu options above need only Python. Running the firmware itself needs either a browser (Wokwi) or VS Code with PlatformIO.
 
 ### Wokwi (Browser)
 
@@ -48,7 +124,7 @@ MPU6050 --I2C 400 kHz--> ESP32 --UART 115200, CSV--> host/live_plot.py --> plot 
 1. Install the PlatformIO IDE and Wokwi Simulator extensions; request a free Wokwi license from the command palette.
 2. `pio run`
 3. Run "Wokwi: Start Simulator" and keep the simulator tab visible.
-4. `python -m host.live_plot --port rfc2217://localhost:4000`
+4. Menu option 3 (or `python -m host.live_plot --port rfc2217://localhost:4000`)
 
 `wokwi.toml` exposes the simulated UART as an RFC2217 server on port 4000, which PySerial opens like a physical port.
 
@@ -61,11 +137,11 @@ MPU6050 --I2C 400 kHz--> ESP32 --UART 115200, CSV--> host/live_plot.py --> plot 
 | SDA | GPIO 21 |
 | SCL | GPIO 22 |
 
-`pio run -t upload`, then `python -m host.live_plot --port /dev/ttyUSB0` (`COM3` on Windows).
+`pio run -t upload`, then menu option 2 (or `python -m host.live_plot --port auto`). Port names: `COM3` style on Windows, `/dev/cu.usbserial-0001` or `/dev/cu.wchusbserial...` on macOS (use the `cu.` one), `/dev/ttyUSB0` on Linux.
 
 ### Synthetic Demo
 
-`python -m host.live_plot --demo` runs the same parser, plotter, and logger on simulated data.
+Menu option 1 (or `python -m host.live_plot --demo`) runs the same parser, plotter, and logger on simulated data.
 
 ## Firmware Notes
 
@@ -87,15 +163,16 @@ t_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,roll_deg,pitch_deg
 
 ## Tests
 
-CI runs three jobs:
+CI runs three jobs (the Python tests on macOS, Windows and Linux with Python 3.9 and 3.13, through `start.py`):
 
-- **Python (pytest):** CSV parsing and corrupt-line rejection, accelerometer angles, τ·b bias bound, fused error below half of the best single sensor
-- **Firmware math (g++):** big-endian byte assembly including negative values, filter coefficient, initialization, bias bound, rotation tracking
+- **Python (pytest):** CSV parsing and corrupt-line rejection, serial port auto-detection, accelerometer angles, τ·b bias bound, fused error below half of the best single sensor
+- **Firmware math (C++ compiler, Linux and macOS):** big-endian byte assembly including negative values, filter coefficient, initialization, bias bound, rotation tracking
 - **Firmware build (PlatformIO):** compiles the ESP32 firmware
 
 ## Project Structure
 
 ```
+start.py                    Beginner launcher: sets up .venv, shows the menu (start.bat on Windows)
 src/main.cpp                ESP32 firmware
 include/imu_filter.h        filter math shared by firmware and host tests
 diagram.json, wokwi.toml    Wokwi circuit and simulator config

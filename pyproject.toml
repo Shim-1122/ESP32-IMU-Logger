@@ -2,8 +2,10 @@
 name = "esp32-imu-logger"
 version = "1.0.0"
 description = "ESP32 + MPU6050 tilt sensing with a complementary filter, simulated in Wokwi, with a Python live plotter"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# matplotlib on Python 3.9 triggers deprecation notices inside the pyparsing library; they are not from this code
+filterwarnings = ["ignore:.*deprecated - use:DeprecationWarning"]

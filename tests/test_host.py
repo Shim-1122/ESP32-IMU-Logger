@@ -53,3 +53,29 @@ def test_run_filter_matches_true_angle_when_still():
     t, accel, gyro, truth = synthetic_imu(duration_s=4, gyro_bias_dps=0.0)   # first 5 s are still
     _, pitch = run_filter(accel, gyro, dt=t[1] - t[0])
     assert np.abs(pitch[100:] - truth[100:]).max() < 1.0
+
+
+# ---- serial port auto-detection (no hardware needed) ----
+from host.stream import pick_serial_port  # noqa: E402
+
+
+def test_pick_port_windows():
+    ports = [("COM1", "Communications Port (COM1)"), ("COM4", "Silicon Labs CP210x USB to UART Bridge (COM4)")]
+    assert pick_serial_port(ports) == "COM4"
+
+
+def test_pick_port_macos_prefers_cu_and_skips_bluetooth():
+    ports = [("/dev/cu.Bluetooth-Incoming-Port", "n/a"), ("/dev/tty.usbserial-0001", "CP2102 USB to UART"),
+             ("/dev/cu.usbserial-0001", "CP2102 USB to UART")]
+    assert pick_serial_port(ports) == "/dev/cu.usbserial-0001"
+
+
+def test_pick_port_linux():
+    ports = [("/dev/ttyS0", "ttyS0"), ("/dev/ttyUSB0", "CP2102 USB to UART Bridge Controller")]
+    assert pick_serial_port(ports) == "/dev/ttyUSB0"
+
+
+def test_pick_port_none_when_nothing_or_ambiguous():
+    assert pick_serial_port([]) is None
+    assert pick_serial_port([("/dev/cu.Bluetooth-Incoming-Port", "")]) is None
+    assert pick_serial_port([("COM3", "USB Serial Device"), ("COM5", "USB Serial Device")]) is None

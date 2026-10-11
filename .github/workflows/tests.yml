@@ -3,21 +3,36 @@ name: tests
 on: [push, pull_request]
 
 jobs:
-  python:
-    runs-on: ubuntu-latest
+  test:
+    name: ${{ matrix.os }}, Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: pytest -v
+          python-version: ${{ matrix.python }}
+      - name: Set up and test through the beginner launcher (start.py)
+        run: python start.py tests
+      - name: "Example: regenerate the filter comparison figure"
+        run: python start.py figure
+      - name: "Example: list serial ports"
+        run: python start.py ports
 
   firmware-math:
-    runs-on: ubuntu-latest
+    name: firmware math, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - run: g++ -std=c++17 -Wall -Wextra -Werror -Iinclude tests/firmware/test_imu_filter.cpp -o test_fw
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -Iinclude tests/firmware/test_imu_filter.cpp -o test_fw
       - run: ./test_fw
 
   firmware-build:
