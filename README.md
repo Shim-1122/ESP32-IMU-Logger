@@ -2,7 +2,7 @@
 
 ![Tests](https://github.com/Shim-1122/ESP32-IMU-Logger/actions/workflows/tests.yml/badge.svg)
 
-ESP32 firmware that reads an MPU6050 IMU at 100 Hz over I2C, estimates roll and pitch with a complementary filter, and streams CSV over serial. A Python host plots and logs the stream in real time. Runs in the Wokwi simulator or on a physical board with no code changes.
+ESP32 firmware that reads an MPU6050 IMU at 100 Hz over I2C, estimates roll and pitch with an extended Kalman filter (EKF) that learns the residual gyro bias online, and streams CSV over serial. A complementary filter is kept as the baseline. A Python host plots and logs the stream in real time. Runs in the Wokwi simulator or on a physical board with no code changes.
 
 ![Filter Comparison](figures/filter_comparison.png)
 
@@ -14,7 +14,8 @@ Synthetic data with known ground truth: sensor 30 cm from a pivot; stationary, 3
 |---|---|
 | Gyro only (integrated rate) | 11.6 |
 | Accelerometer only (gravity angle) | 9.3 |
-| Complementary filter | 2.5 |
+| Complementary filter | 2.55 |
+| **Extended Kalman filter** | **0.25** |
 
 ```
 angle = α · (angle + gyro_rate · dt) + (1 − α) · accel_angle,     α = τ / (τ + dt)
@@ -22,7 +23,27 @@ angle = α · (angle + gyro_rate · dt) + (1 − α) · accel_angle,     α = τ
 
 τ = 0.5 s and dt = 10 ms give α = 0.980. A constant gyro bias b produces a bounded steady error of τ·b, compared with unbounded drift for pure integration (verified in both test suites).
 
+### Extended Kalman Filter
+
+State `x = [roll, pitch, b_x, b_y]`: the two angles plus the gyro bias on each tilt axis.
+
+- **Predict:** full Euler-angle kinematics driven by the bias-corrected gyro, `roll' = p + sin(roll)·tan(pitch)·q + cos(roll)·tan(pitch)·r` and `pitch' = cos(roll)·q − sin(roll)·r`, linearized analytically for the covariance update.
+- **Update:** the accelerometer measures gravity in the body frame, `h(x) = [−sin(pitch), sin(roll)·cos(pitch), cos(roll)·cos(pitch)]`.
+- **Adaptive measurement noise:** `R = σ²_a + k·(|a| − 1 g)²`, so the filter trusts the accelerometer less while the limb is accelerating. This is what removes the complementary filter's lag and overshoot in the swing.
+
+Three improvements over the complementary filter: the residual bias is estimated (0.52 °/s learned vs. 0.50 °/s true) instead of leaving a τ·b offset; there is no small-angle approximation (tested at 40° roll and 35° pitch together); and linear acceleration is rejected instead of passed through. The same filter is in `include/imu_filter.h` (single-precision C++, runs on the ESP32) and `host/imu_math.py` (NumPy); both give 0.25° on the benchmark.
+
 Regenerate with `python -m host.analyze --simulate`.
+
+## Real-Hardware Test
+
+The benchmark above uses simulated ground truth. To score both filters on the real board:
+
+1. Record a session (menu option 2, or `python -m host.live_plot --port auto`). Keep the board still for the 2 s calibration.
+2. Hold the board still at known pitch angles, in order, for 3+ s each (for example 0°, 30°, 45°, 60° on a 3D-printed wedge or against a protractor), moving smoothly between holds.
+3. Run `python -m host.analyze --compare logs/imu_YYYYMMDD_HHMMSS.csv --holds 0,30,45,60`
+
+Both filters are rerun offline from the logged raw accelerometer and gyro columns. Each still segment is matched to the next hold angle, and the per-hold error and RMS for each filter are printed. A `_compare.png` plot is saved next to the log.
 
 ## Architecture
 
@@ -30,7 +51,7 @@ Regenerate with `python -m host.analyze --simulate`.
 MPU6050 --I2C 400 kHz--> ESP32 --UART 115200, CSV--> host/live_plot.py --> plot + logs/*.csv
                          100 Hz fixed-rate loop       serial port, or Wokwi via rfc2217://localhost:4000
                          gyro bias calibration
-                         complementary filter
+                         EKF (or complementary filter)
 ```
 
 ## Getting Started (Mac or Windows, No Experience Needed)
@@ -149,9 +170,10 @@ Menu option 1 (or `python -m host.live_plot --demo`) runs the same parser, plott
 - **Fixed-rate loop** scheduled on `micros()` rather than `delay()`, so the period does not depend on execution time. Signed comparison handles counter wraparound.
 - **Gyro bias calibration:** mean of 200 stationary samples at startup.
 - **Buffered reads:** bytes are read into an array before combining, since the evaluation order of two `Wire.read()` calls in one expression is unspecified.
+- **Filter selection:** `FUSION_EKF` (default 1) picks the EKF; set it to 0 for the complementary filter. The CSV format is identical either way.
 - **Portable filter header:** `include/imu_filter.h` has no Arduino dependencies and is compiled both for the ESP32 and for host unit tests.
 
-Build size: 22% of flash, 7% of RAM.
+Build size with the EKF: 22.5% of flash, 6.7% of RAM.
 
 ## Serial Format
 
@@ -165,8 +187,8 @@ t_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,roll_deg,pitch_deg
 
 CI runs three jobs (the Python tests on macOS, Windows and Linux with Python 3.9 and 3.13, through `start.py`):
 
-- **Python (pytest):** CSV parsing and corrupt-line rejection, serial port auto-detection, accelerometer angles, τ·b bias bound, fused error below half of the best single sensor
-- **Firmware math (C++ compiler, Linux and macOS):** big-endian byte assembly including negative values, filter coefficient, initialization, bias bound, rotation tracking
+- **Python (pytest):** CSV parsing and corrupt-line rejection, serial port auto-detection, accelerometer angles, τ·b bias bound, fused error below half of the best single sensor, EKF error below a quarter of the complementary filter's, EKF bias learning at 0, 0.5 and 2 °/s, combined roll and pitch, still-segment detection and hold scoring on a synthetic recording
+- **Firmware math (C++ compiler, Linux and macOS):** big-endian byte assembly including negative values, filter coefficient, initialization, bias bound, rotation tracking, EKF initialization, bias learning, rotation tracking, and combined roll and pitch
 - **Firmware build (PlatformIO):** compiles the ESP32 firmware
 
 ## Project Structure
@@ -179,9 +201,9 @@ diagram.json, wokwi.toml    Wokwi circuit and simulator config
 platformio.ini              firmware build config
 host/
   stream.py                 serial, Wokwi, and synthetic sources; CSV parser
-  imu_math.py               Python port of the filter; synthetic IMU data
+  imu_math.py               Python port of both filters; synthetic IMU data
   live_plot.py              real-time plot and CSV logging
-  analyze.py                plot recorded logs; regenerate the figure
+  analyze.py                plot recorded logs; regenerate the figure; EKF vs. complementary on real logs
 tests/                      Python tests (tests/firmware/: C++ tests)
 ```
 

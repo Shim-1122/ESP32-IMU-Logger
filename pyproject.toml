@@ -1,7 +1,7 @@
 [project]
 name = "esp32-imu-logger"
 version = "1.0.0"
-description = "ESP32 + MPU6050 tilt sensing with a complementary filter, simulated in Wokwi, with a Python live plotter"
+description = "ESP32 + MPU6050 tilt sensing with an extended Kalman filter, simulated in Wokwi, with a Python live plotter"
 requires-python = ">=3.9"
 
 [tool.pytest.ini_options]

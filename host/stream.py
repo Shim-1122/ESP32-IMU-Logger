@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from .imu_math import ComplementaryFilter, synthetic_imu
+from .imu_math import AttitudeEKF, synthetic_imu
 
 COLUMNS = ["t_ms", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps", "roll_deg", "pitch_deg"]
 
@@ -75,7 +75,7 @@ def serial_lines(port: str, baud: int = 115200):
 def synthetic_lines(fs: int = 100, realtime: bool = True):
     """Yield firmware-format lines from simulated data, looping indefinitely."""
     t, accel, gyro, _ = synthetic_imu(fs=fs)
-    f = ComplementaryFilter(0.5, 1 / fs)
+    f = AttitudeEKF(1 / fs)                 # same default filter as the firmware
     yield "# synthetic demo stream\n"
     start = time.perf_counter()
     for k in range(10**9):

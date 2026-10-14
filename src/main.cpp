@@ -1,7 +1,8 @@
 // ESP32 + MPU6050 tilt logger
 //
 // Reads the IMU at a fixed 100 Hz over I2C (register level, no sensor library),
-// fuses accelerometer and gyro with a complementary filter, and streams CSV
+// fuses accelerometer and gyro with an extended Kalman filter (or the simpler
+// complementary filter, see FUSION_EKF below), and streams CSV
 // over serial for the Python live plotter in host/.
 #include <Arduino.h>
 #include <Wire.h>
@@ -16,6 +17,13 @@ constexpr uint32_t PERIOD_US = 1000000UL / SAMPLE_HZ;
 constexpr float FILTER_TAU_S = 0.5f;      // complementary filter crossover time constant
 constexpr int CALIBRATION_SAMPLES = 200;  // 2 s at startup; keep the sensor still
 
+// 1: extended Kalman filter (learns residual gyro bias, full 3-axis kinematics, rejects
+//    linear acceleration). 0: complementary filter. The CSV format is the same either way,
+//    and host/analyze.py --compare can rerun both filters offline on any recorded log.
+#ifndef FUSION_EKF
+#define FUSION_EKF 1
+#endif
+
 // ------------------------------------------- MPU6050 registers (datasheet RM-MPU-6000A)
 constexpr uint8_t REG_GYRO_CONFIG = 0x1B;
 constexpr uint8_t REG_ACCEL_CONFIG = 0x1C;
@@ -25,7 +33,11 @@ constexpr uint8_t REG_WHO_AM_I = 0x75;
 constexpr float ACCEL_LSB_PER_G = 16384.0f;  // at +/-2 g full scale
 constexpr float GYRO_LSB_PER_DPS = 131.0f;   // at +/-250 deg/s full scale
 
+#if FUSION_EKF
+imu::AttitudeEKF filter(1.0f / SAMPLE_HZ);
+#else
 imu::ComplementaryFilter filter(FILTER_TAU_S, 1.0f / SAMPLE_HZ);
+#endif
 imu::Vec3 gyroBias{0, 0, 0};
 uint32_t nextSampleUs = 0;
 
@@ -93,6 +105,7 @@ void setup() {
   writeRegister(REG_ACCEL_CONFIG, 0x00);  // +/-2 g
 
   calibrateGyro();
+  Serial.println(FUSION_EKF ? "# fusion: extended Kalman filter" : "# fusion: complementary filter");
   Serial.println("# t_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,roll_deg,pitch_deg");
   nextSampleUs = micros();
 }
