@@ -7,11 +7,13 @@ Blender as a JSON UDP packet, and serves a status page at http://127.0.0.1:8080.
     python -m host.portal --demo                  # simulated tilt, no hardware
     python -m host.portal --reset                 # send one packet that re-centres the aircraft
 
-Packet format (UTF-8 JSON):  {"roll": 1.23, "pitch": -4.5, "t_ms": 12345}
+Packet format (UTF-8 JSON):  {"roll": 1.23, "pitch": -4.5, "yaw": 87.0, "t_ms": 12345}
                              {"reset": true}
+"yaw" is left out until the magnetometer has produced a heading.
 """
 import argparse
 import json
+import math
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +22,7 @@ from .stream import COLUMNS, list_serial_ports, parse_line, pick_serial_port, se
 
 ROLL_IDX = COLUMNS.index("roll_deg")
 PITCH_IDX = COLUMNS.index("pitch_deg")
+YAW_IDX = COLUMNS.index("yaw_deg")
 TIME_IDX = COLUMNS.index("t_ms")
 
 PAGE = """<!doctype html>
@@ -38,6 +41,7 @@ PAGE = """<!doctype html>
       <div class="bar"><div class="mark" id="rollbar"></div></div></div>
  <div><div class="label">pitch (deg)</div><div class="v" id="pitch">--</div>
       <div class="bar"><div class="mark" id="pitchbar"></div></div></div>
+ <div><div class="label">heading (deg)</div><div class="v" id="yaw">--</div></div>
 </div>
 <p class="label" id="status">waiting for data</p>
 <script>
@@ -50,6 +54,7 @@ async function tick() {
       const clamp = v => Math.max(-90, Math.min(90, v));
       document.getElementById('rollbar').style.left = (158 + clamp(s.roll) / 90 * 158) + 'px';
       document.getElementById('pitchbar').style.left = (158 + clamp(s.pitch) / 90 * 158) + 'px';
+      document.getElementById('yaw').textContent = s.yaw === null ? '--' : s.yaw.toFixed(1);
       document.getElementById('status').textContent = 'last sample at ' + s.t_ms + ' ms, packets sent: ' + s.sent;
     }
   } catch (e) { document.getElementById('status').textContent = 'portal not reachable'; }
@@ -68,21 +73,25 @@ class SharedState:
         self.lock = threading.Lock()
         self.roll = 0.0
         self.pitch = 0.0
+        self.yaw = None
         self.t_ms = None
         self.sent = 0
 
-    def update(self, roll, pitch, t_ms):
+    def update(self, roll, pitch, yaw, t_ms):
         with self.lock:
-            self.roll, self.pitch, self.t_ms = roll, pitch, t_ms
+            self.roll, self.pitch, self.yaw, self.t_ms = roll, pitch, yaw, t_ms
             self.sent += 1
 
     def snapshot(self):
         with self.lock:
-            return {"roll": self.roll, "pitch": self.pitch, "t_ms": self.t_ms, "sent": self.sent}
+            return {"roll": self.roll, "pitch": self.pitch, "yaw": self.yaw, "t_ms": self.t_ms, "sent": self.sent}
 
 
-def make_packet(roll: float, pitch: float, t_ms: float) -> bytes:
-    return json.dumps({"roll": round(roll, 2), "pitch": round(pitch, 2), "t_ms": int(t_ms)}).encode("utf-8")
+def make_packet(roll: float, pitch: float, t_ms: float, yaw: float = math.nan) -> bytes:
+    msg = {"roll": round(roll, 2), "pitch": round(pitch, 2), "t_ms": int(t_ms)}
+    if math.isfinite(yaw):
+        msg["yaw"] = round(yaw, 2)
+    return json.dumps(msg).encode("utf-8")
 
 
 def make_handler(state: SharedState):
@@ -150,9 +159,10 @@ def main():
             row = parse_line(line)
             if row is None:  # comment, blank, or corrupted line
                 continue
-            roll, pitch, t_ms = float(row[ROLL_IDX]), float(row[PITCH_IDX]), float(row[TIME_IDX])
-            sock.sendto(make_packet(roll, pitch, t_ms), dest)
-            state.update(roll, pitch, t_ms)
+            roll, pitch, yaw = float(row[ROLL_IDX]), float(row[PITCH_IDX]), float(row[YAW_IDX])
+            t_ms = float(row[TIME_IDX])
+            sock.sendto(make_packet(roll, pitch, t_ms, yaw), dest)
+            state.update(roll, pitch, yaw if math.isfinite(yaw) else None, t_ms)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:

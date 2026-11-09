@@ -5,22 +5,28 @@ import numpy as np
 
 from .imu_math import AttitudeEKF, synthetic_imu
 
-COLUMNS = ["t_ms", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps", "roll_deg", "pitch_deg"]
+COLUMNS = ["t_ms", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps", "roll_deg", "pitch_deg", "yaw_deg"]
+# Logs from firmware before the magnetometer was added have no yaw column.
+LEGACY_COLUMNS = len(COLUMNS) - 1
 
 
 def parse_line(line: str):
-    """One CSV line from the firmware -> array of 9 floats.
+    """One CSV line from the firmware -> array of len(COLUMNS) floats.
+    Lines with the older 9 columns (no yaw) are accepted, with yaw set to NaN.
     Comment lines ('#'), blank lines, and lines corrupted in transit return None."""
     line = line.strip()
     if not line or line.startswith("#"):
         return None
     parts = line.split(",")
-    if len(parts) != len(COLUMNS):
+    if len(parts) not in (LEGACY_COLUMNS, len(COLUMNS)):
         return None
     try:
-        return np.array(parts, dtype=float)
+        values = np.array(parts, dtype=float)
     except ValueError:
         return None
+    if len(parts) == LEGACY_COLUMNS:
+        values = np.append(values, np.nan)
+    return values
 
 
 USB_SERIAL_HINTS = ("cp210", "ch340", "ch341", "ch910", "ch9102", "ftdi", "usb serial", "usb-serial", "usb to uart",
@@ -83,5 +89,6 @@ def synthetic_lines(fs: int = 100, realtime: bool = True):
         roll, pitch = f.update(accel[i], gyro[i])
         if realtime:
             time.sleep(max(0.0, start + k / fs - time.perf_counter()))
+        # The simulator has no magnetometer, so yaw is reported as nan (the same as a board without one).
         yield (f"{int(k * 1000 / fs)},{accel[i, 0]:.4f},{accel[i, 1]:.4f},{accel[i, 2]:.4f},"
-               f"{gyro[i, 0]:.3f},{gyro[i, 1]:.3f},{gyro[i, 2]:.3f},{roll:.2f},{pitch:.2f}\n")
+               f"{gyro[i, 0]:.3f},{gyro[i, 1]:.3f},{gyro[i, 2]:.3f},{roll:.2f},{pitch:.2f},nan\n")

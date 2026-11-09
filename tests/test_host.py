@@ -9,13 +9,24 @@ from host.stream import COLUMNS, parse_line, synthetic_lines
 
 
 # -------------------------------------------------------------------- parsing
-def test_parse_valid_line():
+def test_parse_valid_line_with_yaw():
+    s = parse_line("1234,0.01,0.02,0.99,0.1,-0.2,0.3,1.5,-2.5,87.25\r\n")
+    assert s.shape == (len(COLUMNS),)
+    assert s[0] == 1234 and s[-2] == -2.5 and s[-1] == 87.25
+
+
+def test_parse_legacy_line_without_yaw_pads_nan():
     s = parse_line("1234,0.01,0.02,0.99,0.1,-0.2,0.3,1.5,-2.5\r\n")
     assert s.shape == (len(COLUMNS),)
-    assert s[0] == 1234 and s[-1] == -2.5
+    assert s[0] == 1234 and s[-2] == -2.5 and np.isnan(s[-1])
 
 
-@pytest.mark.parametrize("bad", ["", "# gyro bias", "1,2,3", "1,2,x,4,5,6,7,8,9", "1,2,3,4,5,6,7,8,9,10"])
+def test_parse_firmware_nan_yaw_before_heading_is_ready():
+    s = parse_line("1234,0.01,0.02,0.99,0.1,-0.2,0.3,1.5,-2.5,nan")
+    assert s is not None and np.isnan(s[-1])
+
+
+@pytest.mark.parametrize("bad", ["", "# gyro bias", "1,2,3", "1,2,x,4,5,6,7,8,9", "1,2,3,4,5,6,7,8,9,10,11"])
 def test_parse_rejects_comments_and_corrupt_lines(bad):
     assert parse_line(bad) is None
 
@@ -122,7 +133,7 @@ def _hold_log(tmp_path, holds, bias=0.5, fs=100, seed=0):
     accel = np.column_stack([-np.sin(r), np.zeros_like(t), np.cos(r)]) + 0.02 * rng.standard_normal((len(t), 3))
     gyro = np.column_stack([np.zeros_like(t), rate, np.zeros_like(t)]) + bias + 0.3 * rng.standard_normal((len(t), 3))
     path = tmp_path / "holds.csv"
-    rows = np.column_stack([t * 1000, accel, gyro, np.zeros((len(t), 2))])
+    rows = np.column_stack([t * 1000, accel, gyro, np.zeros((len(t), 3))])  # roll, pitch, yaw columns
     np.savetxt(path, rows, delimiter=",", header=",".join(COLUMNS), comments="", fmt="%.5f")
     return path
 

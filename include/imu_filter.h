@@ -205,4 +205,58 @@ class AttitudeEKF {
   bool initialized_ = false;
 };
 
+// ------------------------------------------------------------ heading (yaw)
+// Wrap an angle to [-180, 180) degrees.
+inline float wrap180(float deg) {
+  float w = std::fmod(deg + 180.0f, 360.0f);
+  if (w < 0.0f) w += 360.0f;
+  return w - 180.0f;
+}
+
+// Tilt-compensated magnetic heading (degrees, [-180, 180)).
+// m is the magnetometer reading with hard-iron offsets removed (any units, all axes alike).
+// rollDeg and pitchDeg come from the attitude filter, in the same convention as accelRoll and
+// accelPitch. The field is projected onto the horizontal plane before the heading is taken.
+// sign (+1 or -1) sets the direction of positive heading; see README to check it.
+inline float magHeadingDeg(const Vec3& m, float rollDeg, float pitchDeg, float sign = 1.0f) {
+  const float phi = rollDeg / RAD_TO_DEG_F, theta = pitchDeg / RAD_TO_DEG_F;
+  const float sp = std::sin(phi), cp = std::cos(phi), st = std::sin(theta), ct = std::cos(theta);
+  const float xh = m.x * ct + m.y * sp * st + m.z * cp * st;  // horizontal, forward
+  const float yh = m.y * cp - m.z * sp;                       // horizontal, right
+  return wrap180(sign * std::atan2(-yh, xh) * RAD_TO_DEG_F);
+}
+
+// Complementary filter for yaw: integrated gyro z for short-term motion, pulled toward the
+// magnetometer heading for the long term. The gyro drifts slowly and the magnetometer is
+// absolute but disturbed by nearby metal, so the crossover time constant is long.
+//
+//     yaw = alpha * (yaw + gz * dt) + (1 - alpha) * mag_heading     (angles wrapped, short way round)
+//     alpha = tau / (tau + dt)
+//
+// sign must match the sign passed to magHeadingDeg, so both measure heading the same way.
+class YawFilter {
+ public:
+  YawFilter(float tau_s, float dt_s, float sign = 1.0f) : alpha_(tau_s / (tau_s + dt_s)), dt_(dt_s), sign_(sign) {}
+
+  // gz in deg/s with bias removed; magHeading in degrees, used only when magValid
+  void update(float gz_dps, float magHeading, bool magValid) {
+    if (!initialized_) {  // start from the magnetometer, which is absolute
+      if (!magValid) return;
+      yaw_ = magHeading;
+      initialized_ = true;
+      return;
+    }
+    yaw_ = wrap180(yaw_ + sign_ * gz_dps * dt_);
+    if (magValid) yaw_ = wrap180(yaw_ + (1.0f - alpha_) * wrap180(magHeading - yaw_));
+  }
+
+  float yaw() const { return yaw_; }
+  bool initialized() const { return initialized_; }
+
+ private:
+  float alpha_, dt_, sign_;
+  float yaw_ = 0.0f;
+  bool initialized_ = false;
+};
+
 }  // namespace imu

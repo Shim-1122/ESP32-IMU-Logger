@@ -138,7 +138,7 @@ The menu options above need only Python. Running the firmware itself needs eithe
 2. Replace `sketch.ino` with `src/main.cpp`.
 3. Add a file named `imu_filter.h` containing `include/imu_filter.h`.
 4. Replace `diagram.json` with the one in this repo.
-5. Start the simulation. CSV lines begin after the 2 s gyro calibration. Adjust the MPU6050 sliders to change the inputs.
+5. Start the simulation. CSV lines begin after the 2 s gyro calibration. Adjust the MPU6050 sliders to change the inputs. The simulated circuit has no QMC5883L, so the firmware prints a warning, skips the magnetometer calibration, and reports `yaw_deg` as `nan`.
 
 ### Wokwi (VS Code) with Live Plot
 
@@ -158,6 +158,21 @@ The menu options above need only Python. Running the firmware itself needs eithe
 | SDA | GPIO 21 |
 | SCL | GPIO 22 |
 
+Add a QMC5883L magnetometer module on the same bus (it is at address 0x0D, so it does not clash with the MPU6050 at 0x68):
+
+| QMC5883L | ESP32 |
+|---|---|
+| VCC | 3V3 (check your module's label: some boards accept 5V, the chip itself is 3.3V) |
+| GND | GND |
+| SDA | GPIO 21 |
+| SCL | GPIO 22 |
+
+Mount the magnetometer with its axes aligned to the MPU6050's (same X, Y and Z directions), and keep it away from motors, batteries, and steel or magnets. The firmware assumes the two sensors share one orientation. Without a QMC5883L the firmware still runs, prints a warning, and reports `yaw_deg` as `nan`.
+
+**Magnetometer calibration.** After the 2 s gyro calibration, the firmware asks you to rotate the board slowly in every direction for 15 s. It takes the midpoint of each axis's range as the offset and prints it as `# mag offset`. Rotate the board through all orientations during that time, not just around one axis. Soft-iron distortion from nearby metal is not corrected.
+
+**Checking the heading direction.** Set `HEADING_SIGN` in `src/main.cpp`, then place the board flat, note `yaw_deg`, and turn it clockwise seen from above. If the value falls, set `HEADING_SIGN` to `-1.0f`. Both the magnetometer and the gyro use this sign, so they stay consistent. Heading is relative to magnetic north, and no magnetic declination is applied.
+
 `pio run -t upload`, then menu option 2 (or `python -m host.live_plot --port auto`). Port names: `COM3` style on Windows, `/dev/cu.usbserial-0001` or `/dev/cu.wchusbserial...` on macOS (use the `cu.` one), `/dev/ttyUSB0` on Linux.
 
 ### Synthetic Demo
@@ -172,6 +187,7 @@ Menu option 1 (or `python -m host.live_plot --demo`) runs the same parser, plott
 - **Buffered reads:** bytes are read into an array before combining, since the evaluation order of two `Wire.read()` calls in one expression is unspecified.
 - **Filter selection:** `FUSION_EKF` (default 1) picks the EKF; set it to 0 for the complementary filter. The CSV format is identical either way.
 - **Portable filter header:** `include/imu_filter.h` has no Arduino dependencies and is compiled both for the ESP32 and for host unit tests.
+- **Heading (yaw):** the QMC5883L is read every sample and tilt-compensated with the filter's roll and pitch. A complementary yaw filter takes the gyro's z rate for short-term motion and pulls toward the magnetometer heading over about 10 s (`YAW_TAU_S`). That keeps gyro drift bounded and keeps brief magnetic disturbances from jumping the heading.
 
 Build size with the EKF: 22.5% of flash, 6.7% of RAM.
 
@@ -185,7 +201,7 @@ Tilt the board to fly a jet in Blender. `host/portal.py` reads the board (or sim
 
 Tilt the board and the jet banks and pitches. Tilt past 3° and it also moves: roll slides it sideways and pitch climbs or descends it. Keep the board level to hold position. Run `python -m host.portal --reset` to re-centre the jet.
 
-Tuning constants are at the top of `aircraft_control.py`: `ROLL_SIGN` and `PITCH_SIGN` flip directions, `DEADBAND_DEG`, `SPEED_PER_DEG`, and `SMOOTHING`. Heading (yaw) is not measured, because the MPU6050 has no magnetometer.
+Tuning constants are at the top of `aircraft_control.py`: `ROLL_SIGN`, `PITCH_SIGN` and `YAW_SIGN` flip directions, `DEADBAND_DEG`, `SPEED_PER_DEG`, and `SMOOTHING`. With the magnetometer fitted, the jet turns to follow the board's heading. The portal sends `yaw` only when it has a value, so without a magnetometer the jet keeps pointing along +Y.
 
 The Blender tests need `bpy` (`pip install bpy`) and are skipped when it is missing.
 
@@ -194,8 +210,10 @@ The Blender tests need `bpy` (`pip install bpy`) and are skipped when it is miss
 Lines beginning with `#` are status messages. Each sample (100 Hz):
 
 ```
-t_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,roll_deg,pitch_deg
+t_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,roll_deg,pitch_deg,yaw_deg
 ```
+
+`yaw_deg` is `nan` until the magnetometer has produced a first heading, and always `nan` when no magnetometer is present. Logs recorded before the magnetometer was added (9 columns) still load: the parser fills `yaw_deg` with `nan`.
 
 ## Tests
 
@@ -214,7 +232,7 @@ include/imu_filter.h        filter math shared by firmware and host tests
 diagram.json, wokwi.toml    Wokwi circuit and simulator config
 platformio.ini              firmware build config
 host/
-  stream.py                 serial, Wokwi, and synthetic sources; CSV parser
+  stream.py                 serial, Wokwi, and synthetic sources; CSV parser (9 or 10 columns)
   imu_math.py               Python port of both filters; synthetic IMU data
   live_plot.py              real-time plot and CSV logging
   analyze.py                plot recorded logs; regenerate the figure; EKF vs. complementary on real logs
