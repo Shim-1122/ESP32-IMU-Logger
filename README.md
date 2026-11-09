@@ -158,16 +158,16 @@ The menu options above need only Python. Running the firmware itself needs eithe
 | SDA | GPIO 21 |
 | SCL | GPIO 22 |
 
-Add a QMC5883L magnetometer module on the same bus (it is at address 0x0D, so it does not clash with the MPU6050 at 0x68):
+Add a QMC5883L magnetometer board on the ESP32's second I2C bus. It has its own pins so that it can be read in parallel with the MPU6050 (see Design notes):
 
 | QMC5883L | ESP32 |
 |---|---|
 | VCC | 3V3 (check your module's label: some boards accept 5V, the chip itself is 3.3V) |
 | GND | GND |
-| SDA | GPIO 21 |
-| SCL | GPIO 22 |
+| SDA | GPIO 25 |
+| SCL | GPIO 26 |
 
-Mount the magnetometer with its axes aligned to the MPU6050's (same X, Y and Z directions), and keep it away from motors, batteries, and steel or magnets. The firmware assumes the two sensors share one orientation. Without a QMC5883L the firmware still runs, prints a warning, and reports `yaw_deg` as `nan`.
+Mount the magnetometer board flat, in the same plane as the ESP32 and the MPU6050, with its X, Y and Z axes pointing the same way as the MPU6050's, and keep it away from motors, batteries, and steel or magnets. The firmware assumes the two sensors share one orientation. Without a QMC5883L the firmware still runs, prints a warning, and reports `yaw_deg` as `nan`.
 
 **Magnetometer calibration.** After the 2 s gyro calibration, the firmware asks you to rotate the board slowly in every direction for 15 s. It takes the midpoint of each axis's range as the offset and prints it as `# mag offset`. Rotate the board through all orientations during that time, not just around one axis. Soft-iron distortion from nearby metal is not corrected.
 
@@ -187,7 +187,8 @@ Menu option 1 (or `python -m host.live_plot --demo`) runs the same parser, plott
 - **Buffered reads:** bytes are read into an array before combining, since the evaluation order of two `Wire.read()` calls in one expression is unspecified.
 - **Filter selection:** `FUSION_EKF` (default 1) picks the EKF; set it to 0 for the complementary filter. The CSV format is identical either way.
 - **Portable filter header:** `include/imu_filter.h` has no Arduino dependencies and is compiled both for the ESP32 and for host unit tests.
-- **Heading (yaw):** the QMC5883L is read every sample and tilt-compensated with the filter's roll and pitch. A complementary yaw filter takes the gyro's z rate for short-term motion and pulls toward the magnetometer heading over about 10 s (`YAW_TAU_S`). That keeps gyro drift bounded and keeps brief magnetic disturbances from jumping the heading.
+- **Two cores, two buses:** the main loop runs on core 1 and owns I2C bus 0 (MPU6050). A FreeRTOS task pinned to core 0 owns I2C bus 1 (QMC5883L) and reads it at 100 Hz. Because each bus has one user, neither core waits on the other's sensor. The cores exchange only roll, pitch and the latest heading, through a small struct guarded by a spinlock (`portENTER_CRITICAL`). Only core 1 writes to Serial, so the CSV lines never interleave. If the task stops producing headings, the yaw filter falls back to the gyro alone.
+- **Heading (yaw):** the magnetometer task tilt-compensates each reading with the latest roll and pitch from core 1. A complementary yaw filter takes the gyro's z rate for short-term motion and pulls toward the magnetometer heading over about 10 s (`YAW_TAU_S`). That keeps gyro drift bounded and keeps brief magnetic disturbances from jumping the heading.
 
 Build size with the EKF: 22.5% of flash, 6.7% of RAM.
 
