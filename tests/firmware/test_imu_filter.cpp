@@ -95,6 +95,19 @@ int main() {
   // Roll the board 40 deg with a north field: the field is unchanged along the roll axis
   CHECK_NEAR(imu::magHeadingDeg({1.0f, 0.0f, 0.0f}, 40, 0), 0, 1e-3);
 
+  // ICM-20948 magnetometer axes -> accelerometer axes: y and z flip, x unchanged
+  {
+    const imu::Vec3 m = imu::ak09916ToImuFrame({10.0f, 20.0f, 30.0f});
+    CHECK_NEAR(m.x, 10, 0);
+    CHECK_NEAR(m.y, -20, 0);
+    CHECK_NEAR(m.z, -30, 0);
+  }
+  // Heading is counterclockwise-positive in the z-up frame: turn the board 90 deg CCW from
+  // north and north ends up on its right (-y), which must read +90.
+  CHECK_NEAR(imu::magHeadingDeg({0.0f, -1.0f, 0.0f}, 0, 0), 90, 1e-3);
+  // Same turn seen by the raw AK09916 (its +y is the board's right): +y raw maps to -y.
+  CHECK_NEAR(imu::magHeadingDeg(imu::ak09916ToImuFrame({0.0f, 1.0f, 0.0f}), 0, 0), 90, 1e-3);
+
   // ------------------------------------------------------------ yaw filter
   // Starts from the magnetometer, not zero
   imu::YawFilter y0(10.0f, 0.01f);

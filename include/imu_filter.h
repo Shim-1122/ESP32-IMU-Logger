@@ -213,11 +213,18 @@ inline float wrap180(float deg) {
   return w - 180.0f;
 }
 
+// ICM-20948: the AK09916 magnetometer die is mounted with its y and z axes opposite to the
+// accelerometer and gyro (accel/gyro: +x forward, +y left, +z up; AK09916: +x forward, +y right,
+// +z down). This maps a magnetometer reading into the accelerometer's axes, which is the frame
+// magHeadingDeg expects.
+inline Vec3 ak09916ToImuFrame(const Vec3& m) { return {m.x, -m.y, -m.z}; }
+
 // Tilt-compensated magnetic heading (degrees, [-180, 180)).
 // m is the magnetometer reading with hard-iron offsets removed (any units, all axes alike).
 // rollDeg and pitchDeg come from the attitude filter, in the same convention as accelRoll and
 // accelPitch. The field is projected onto the horizontal plane before the heading is taken.
-// sign (+1 or -1) sets the direction of positive heading; see README to check it.
+// In a z-up sensor frame, heading is 0 when +x points at magnetic north and increases as the
+// board turns counterclockwise seen from above. sign = -1 gives a clockwise compass heading.
 inline float magHeadingDeg(const Vec3& m, float rollDeg, float pitchDeg, float sign = 1.0f) {
   const float phi = rollDeg / RAD_TO_DEG_F, theta = pitchDeg / RAD_TO_DEG_F;
   const float sp = std::sin(phi), cp = std::cos(phi), st = std::sin(theta), ct = std::cos(theta);
