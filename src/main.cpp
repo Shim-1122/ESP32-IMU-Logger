@@ -1,14 +1,20 @@
 // ESP32 tilt and heading logger
 //
-// Two sensors, two I2C buses, two cores:
-//   * MPU6050 (accelerometer and gyro) on I2C bus 0, read by the main loop on core 1.
-//     Fused into roll and pitch with an extended Kalman filter (or the complementary filter,
-//     see FUSION_EKF), and gyro z feeds the yaw filter.
-//   * QMC5883L (magnetometer) on I2C bus 1, read by its own FreeRTOS task on core 0.
-//     The task tilt-compensates each reading with the latest roll and pitch and publishes a
-//     magnetic heading.
+// Two sensors, two I2C buses, two FreeRTOS tasks:
+//   * MPU6050 (accelerometer and gyro) on I2C bus 0, read by the main loop (Arduino loopTask,
+//     priority 2). Fused into roll and pitch with an extended Kalman filter (or the
+//     complementary filter, see FUSION_EKF), and gyro z feeds the yaw filter.
+//   * QMC5883L (magnetometer) on I2C bus 1, read by its own task (priority 1). The task
+//     tilt-compensates each reading with the latest roll and pitch and publishes a heading.
 // The main loop fuses gyro z with the newest heading into yaw and streams CSV over serial, for
 // the live plotter and the Blender portal in host/. Register level, no sensor libraries.
+//
+// Targets (platformio.ini):
+//   * ESP32-C6 (default): one CPU core, so the two tasks interleave on it. Bus 0 is the main
+//     I2C controller; bus 1 is the low-power I2C controller, whose pins are fixed (GPIO 6, 7).
+//   * ESP32 (esp32dev): two cores. loop() runs on core 1 and the magnetometer task on core 0,
+//     so the sensors are read truly in parallel.
+// Each bus has a single user, so no bus lock is needed.
 #include <Arduino.h>
 #include <Wire.h>
 
@@ -19,12 +25,19 @@
 // ------------------------------------------------------------ configuration
 constexpr uint8_t MPU_ADDR = 0x68;        // MPU6050 I2C address with AD0 pin low
 constexpr uint8_t QMC_ADDR = 0x0D;        // QMC5883L I2C address (fixed)
-constexpr int IMU_SDA_PIN = 21, IMU_SCL_PIN = 22;  // I2C bus 0: MPU6050
+constexpr int IMU_SDA_PIN = 21, IMU_SCL_PIN = 22;  // I2C bus 0: MPU6050 (both targets)
+#if CONFIG_IDF_TARGET_ESP32C6
+constexpr int MAG_SDA_PIN = 6, MAG_SCL_PIN = 7;    // I2C bus 1: QMC5883L on the LP I2C controller (fixed pins)
+#else
 constexpr int MAG_SDA_PIN = 25, MAG_SCL_PIN = 26;  // I2C bus 1: QMC5883L
+#endif
+constexpr uint32_t IMU_I2C_HZ = 400000;   // fast mode: the 14-byte read takes about 0.4 ms
+constexpr uint32_t MAG_I2C_HZ = 100000;   // standard mode, supported by every controller; 6 bytes take about 0.8 ms
 constexpr uint32_t SAMPLE_HZ = 100;
-constexpr uint32_t PERIOD_US = 1000000UL / SAMPLE_HZ;
 constexpr uint32_t MAG_TASK_HZ = 100;     // magnetometer task rate (the sensor outputs at 200 Hz)
-constexpr BaseType_t MAG_TASK_CORE = 0;   // Arduino's loop() runs on core 1
+constexpr BaseType_t MAG_TASK_CORE = 0;   // the only core on the C6; the other core from loop() on the ESP32
+constexpr UBaseType_t LOOP_PRIORITY = 2;  // IMU sampling preempts the magnetometer task
+constexpr UBaseType_t MAG_TASK_PRIORITY = 1;
 constexpr uint32_t MAG_TASK_STACK = 4096; // bytes
 constexpr float FILTER_TAU_S = 0.5f;      // complementary filter crossover time constant
 constexpr int CALIBRATION_SAMPLES = 200;  // 2 s at startup; keep the sensor still
@@ -59,8 +72,8 @@ constexpr uint8_t QMC_CHIP_ID = 0xFF;
 // Continuous mode, 200 Hz output, +/-8 G range, OSR 512: 0b0001'1101
 constexpr uint8_t QMC_CONTROL1_VALUE = 0x1D;
 
-TwoWire& imuBus = Wire;   // bus 0, used only by loop() on core 1
-TwoWire& magBus = Wire1;  // bus 1, used only by the magnetometer task on core 0 (after setup)
+TwoWire& imuBus = Wire;   // bus 0, used only by loop()
+TwoWire& magBus = Wire1;  // bus 1, used only by the magnetometer task (after setup)
 
 #if FUSION_EKF
 imu::AttitudeEKF filter(1.0f / SAMPLE_HZ);
@@ -71,11 +84,10 @@ imu::YawFilter yawFilter(YAW_TAU_S, 1.0f / SAMPLE_HZ, HEADING_SIGN);
 imu::Vec3 gyroBias{0, 0, 0};
 imu::Vec3 magOffset{0, 0, 0};  // hard-iron offset in raw counts, from calibrateMag()
 bool magOk = false;
-uint32_t nextSampleUs = 0;
 
 // ---------------------------------------------------- state shared between cores
-// The only data the two cores exchange. Every access holds sharedLock, a spinlock that works
-// across cores. Critical sections are a few loads and stores, far shorter than a sample period.
+// The only data the two tasks exchange. Every access holds sharedLock, a spinlock that is safe
+// across cores and between tasks on one core. Critical sections are a few loads and stores.
 struct SharedState {
   float roll = 0.0f, pitch = 0.0f;  // written by loop(), read by the magnetometer task
   float heading = 0.0f;             // written by the magnetometer task, read by loop()
@@ -169,9 +181,9 @@ void calibrateMag() {
   Serial.printf("# mag offset (counts): %.1f %.1f %.1f\n", magOffset.x, magOffset.y, magOffset.z);
 }
 
-// ------------------------------------------------------- magnetometer task (core 0)
-// Reads the QMC5883L at MAG_TASK_HZ, tilt-compensates with the latest roll and pitch from
-// core 1, and publishes the heading. It never touches bus 0 or Serial.
+// ------------------------------------------------------------ magnetometer task
+// Reads the QMC5883L at MAG_TASK_HZ, tilt-compensates with the latest roll and pitch from the
+// main loop, and publishes the heading. It never touches bus 0 or Serial.
 void magTask(void*) {
   const TickType_t period = pdMS_TO_TICKS(1000 / MAG_TASK_HZ);
   TickType_t lastWake = xTaskGetTickCount();
@@ -203,13 +215,12 @@ void magTask(void*) {
 // -------------------------------------------------------------- main program
 void setup() {
   Serial.begin(115200);
-  imuBus.begin(IMU_SDA_PIN, IMU_SCL_PIN);
-  imuBus.setClock(400000);  // 400 kHz fast mode: the 14-byte read takes about 0.4 ms
-  magBus.begin(MAG_SDA_PIN, MAG_SCL_PIN);
-  magBus.setClock(400000);
+  vTaskPrioritySet(nullptr, LOOP_PRIORITY);  // setup() and loop() run in Arduino's loopTask
+  imuBus.begin(IMU_SDA_PIN, IMU_SCL_PIN, IMU_I2C_HZ);
+  const bool magBusOk = magBus.begin(MAG_SDA_PIN, MAG_SCL_PIN, MAG_I2C_HZ);
 
   if (readRegister(imuBus, MPU_ADDR, REG_WHO_AM_I) != 0x68) {
-    Serial.println("# ERROR: MPU6050 not found on bus 0 (GPIO 21/22). Check wiring and I2C address.");
+    Serial.printf("# ERROR: MPU6050 not found on bus 0 (SDA GPIO %d, SCL GPIO %d). Check wiring.\n", IMU_SDA_PIN, IMU_SCL_PIN);
     while (true) delay(1000);
   }
   writeRegister(imuBus, MPU_ADDR, REG_PWR_MGMT_1, 0x01);    // wake up, clock from gyro PLL (more stable than internal RC)
@@ -218,13 +229,14 @@ void setup() {
 
   calibrateGyro();
 
-  magOk = readRegister(magBus, QMC_ADDR, REG_QMC_CHIP_ID) == QMC_CHIP_ID;
+  magOk = magBusOk && readRegister(magBus, QMC_ADDR, REG_QMC_CHIP_ID) == QMC_CHIP_ID;
   if (magOk) {
     writeRegister(magBus, QMC_ADDR, REG_QMC_SET_RESET, 0x01);
     writeRegister(magBus, QMC_ADDR, REG_QMC_CONTROL1, QMC_CONTROL1_VALUE);
     calibrateMag();
     // From here on, only the task uses bus 1.
-    if (xTaskCreatePinnedToCore(magTask, "mag", MAG_TASK_STACK, nullptr, 1, &magTaskHandle, MAG_TASK_CORE) != pdPASS) {
+    if (xTaskCreatePinnedToCore(magTask, "mag", MAG_TASK_STACK, nullptr, MAG_TASK_PRIORITY, &magTaskHandle,
+                                MAG_TASK_CORE) != pdPASS) {
       magOk = false;
       Serial.println("# WARN: could not start the magnetometer task. yaw_deg will be nan.");
     } else {
@@ -232,19 +244,20 @@ void setup() {
                     (unsigned long)MAG_TASK_HZ);
     }
   } else {
-    Serial.println("# WARN: QMC5883L not found on bus 1 (GPIO 25/26). yaw_deg will be nan. Check wiring.");
+    Serial.printf("# WARN: QMC5883L not found on bus 1 (SDA GPIO %d, SCL GPIO %d). yaw_deg will be nan.\n",
+                  MAG_SDA_PIN, MAG_SCL_PIN);
   }
 
   Serial.println(FUSION_EKF ? "# fusion: extended Kalman filter" : "# fusion: complementary filter");
   Serial.println("# t_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,roll_deg,pitch_deg,yaw_deg");
-  nextSampleUs = micros();
 }
 
 void loop() {
-  // Fixed-rate scheduling (not delay()): the period does not depend on execution time.
-  // The signed difference handles micros() wraparound.
-  if ((int32_t)(micros() - nextSampleUs) < 0) return;
-  nextSampleUs += PERIOD_US;
+  // Fixed-rate scheduling: vTaskDelayUntil wakes at absolute multiples of the period, so the rate
+  // does not depend on execution time, and the task sleeps in between. Sleeping matters on the
+  // single-core C6: a busy-wait would starve the magnetometer task and the idle task.
+  static TickType_t lastWake = xTaskGetTickCount();
+  vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000 / SAMPLE_HZ));
 
   imu::Vec3 a, g;
   if (!readImu(a, g)) {

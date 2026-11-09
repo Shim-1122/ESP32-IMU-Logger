@@ -86,6 +86,19 @@ def test_pick_port_linux():
     assert pick_serial_port(ports) == "/dev/ttyUSB0"
 
 
+def test_pick_port_esp32c6_prefers_ch343_over_native_usb():
+    # Both USB-C ports of the C6 DevKit plugged in: the firmware prints on the CH343 port.
+    mac = [("/dev/cu.usbmodem1101", "USB JTAG/serial debug unit"),
+           ("/dev/tty.usbmodem1101", "USB JTAG/serial debug unit"),
+           ("/dev/cu.usbmodem5A7A0123451", "USB Single Serial"),
+           ("/dev/tty.usbmodem5A7A0123451", "USB Single Serial")]
+    assert pick_serial_port(mac) == "/dev/cu.usbmodem5A7A0123451"
+    win = [("COM6", "USB JTAG/serial debug unit (COM6)"), ("COM7", "USB-SERIAL CH343 (COM7)")]
+    assert pick_serial_port(win) == "COM7"
+    # Only the native port plugged in: still picked, since it is the only candidate.
+    assert pick_serial_port([("COM6", "USB JTAG/serial debug unit (COM6)")]) == "COM6"
+
+
 def test_pick_port_none_when_nothing_or_ambiguous():
     assert pick_serial_port([]) is None
     assert pick_serial_port([("/dev/cu.Bluetooth-Incoming-Port", "")]) is None

@@ -29,8 +29,12 @@ def parse_line(line: str):
     return values
 
 
-USB_SERIAL_HINTS = ("cp210", "ch340", "ch341", "ch910", "ch9102", "ftdi", "usb serial", "usb-serial", "usb to uart",
-                    "uart", "slab", "usbserial", "usbmodem", "wchusbserial", "ttyusb", "ttyacm", "jtag")
+USB_SERIAL_HINTS = ("cp210", "ch340", "ch341", "ch343", "ch910", "ch9102", "ftdi", "usb serial", "usb-serial",
+                    "usb single serial", "usb to uart", "uart", "slab", "usbserial", "usbmodem", "wchusbserial",
+                    "ttyusb", "ttyacm")
+# The chip's own USB port (USB JTAG/serial on the ESP32-C6, S3, C3). The firmware prints on the
+# USB-to-UART chip instead (CH343 on the C6 DevKit), so these rank below a USB-serial chip.
+NATIVE_USB_HINTS = ("jtag",)
 NOT_A_BOARD_HINTS = ("bluetooth", "debug-console", "wlan-debug")
 
 
@@ -43,15 +47,22 @@ def list_serial_ports():
 def pick_serial_port(ports):
     """Best guess at the ESP32 among (device, description) pairs, or None if it is unclear.
 
-    Windows names ports COM3, COM4, ...; macOS /dev/cu.usbserial-XXXX, /dev/cu.SLAB_USBtoUART or
-    /dev/cu.wchusbserialXXXX (the cu. device, not tty.); Linux /dev/ttyUSB0 or /dev/ttyACM0.
+    Windows names ports COM3, COM4, ...; macOS /dev/cu.usbserial-XXXX, /dev/cu.SLAB_USBtoUART,
+    /dev/cu.wchusbserialXXXX or /dev/cu.usbmodemXXXX (the cu. device, not tty.); Linux /dev/ttyUSB0
+    or /dev/ttyACM0. With both USB ports of an ESP32-C6 DevKit plugged in, the CH343 port wins over
+    the chip's native USB JTAG/serial port.
     """
     scored = []
     for dev, desc in ports:
         text = f"{dev} {desc}".lower()
         if any(h in text for h in NOT_A_BOARD_HINTS):
             continue
-        score = 2 if any(h in text for h in USB_SERIAL_HINTS) else 0
+        if any(h in text for h in NATIVE_USB_HINTS):
+            score = 1
+        elif any(h in text for h in USB_SERIAL_HINTS):
+            score = 2
+        else:
+            score = 0
         if dev.startswith("/dev/tty."):        # macOS lists each port twice; the cu. one is right
             score -= 1
         if dev.startswith("/dev/ttyS"):        # Linux built-in serial ports, never the board

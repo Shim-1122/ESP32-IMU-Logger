@@ -138,12 +138,12 @@ The menu options above need only Python. Running the firmware itself needs eithe
 2. Replace `sketch.ino` with `src/main.cpp`.
 3. Add a file named `imu_filter.h` containing `include/imu_filter.h`.
 4. Replace `diagram.json` with the one in this repo.
-5. Start the simulation. CSV lines begin after the 2 s gyro calibration. Adjust the MPU6050 sliders to change the inputs. The simulated circuit has no QMC5883L, so the firmware prints a warning, skips the magnetometer calibration, and reports `yaw_deg` as `nan`.
+5. Start the simulation (Wokwi simulates the original ESP32 board). CSV lines begin after the 2 s gyro calibration. Adjust the MPU6050 sliders to change the inputs. The simulated circuit has no QMC5883L, so the firmware prints a warning, skips the magnetometer calibration, and reports `yaw_deg` as `nan`.
 
 ### Wokwi (VS Code) with Live Plot
 
 1. Install the PlatformIO IDE and Wokwi Simulator extensions; request a free Wokwi license from the command palette.
-2. `pio run`
+2. `pio run -e esp32dev`
 3. Run "Wokwi: Start Simulator" and keep the simulator tab visible.
 4. Menu option 3 (or `python -m host.live_plot --port rfc2217://localhost:4000`)
 
@@ -151,29 +151,28 @@ The menu options above need only Python. Running the firmware itself needs eithe
 
 ### Hardware
 
-| MPU6050 | ESP32 |
-|---|---|
-| VCC | 3V3 |
-| GND | GND |
-| SDA | GPIO 21 |
-| SCL | GPIO 22 |
+The default target is the **ESP32-C6 DevKit** (single RISC-V core, CH343 USB serial chip, two USB-C ports). The original dual-core ESP32 DevKit is also supported (`pio run -e esp32dev`).
 
-Add a QMC5883L magnetometer board on the ESP32's second I2C bus. It has its own pins so that it can be read in parallel with the MPU6050 (see Design notes):
+![Wiring diagram](figures/wiring_diagram.svg)
 
-| QMC5883L | ESP32 |
-|---|---|
-| VCC | 3V3 (check your module's label: some boards accept 5V, the chip itself is 3.3V) |
-| GND | GND |
-| SDA | GPIO 25 |
-| SCL | GPIO 26 |
+| Sensor pin | ESP32-C6 | ESP32 (esp32dev) |
+|---|---|---|
+| MPU6050 VCC, QMC5883L VCC | 3V3 | 3V3 |
+| MPU6050 GND, QMC5883L GND | GND | GND |
+| MPU6050 SDA (I2C bus 0) | GPIO 21 | GPIO 21 |
+| MPU6050 SCL (I2C bus 0) | GPIO 22 | GPIO 22 |
+| QMC5883L SDA (I2C bus 1) | GPIO 6 (low-power I2C, fixed pin) | GPIO 25 |
+| QMC5883L SCL (I2C bus 1) | GPIO 7 (low-power I2C, fixed pin) | GPIO 26 |
 
-Mount the magnetometer board flat, in the same plane as the ESP32 and the MPU6050, with its X, Y and Z axes pointing the same way as the MPU6050's, and keep it away from motors, batteries, and steel or magnets. The firmware assumes the two sensors share one orientation. Without a QMC5883L the firmware still runs, prints a warning, and reports `yaw_deg` as `nan`.
+On the ESP32-C6, plug in the USB-C port marked **CH343**: the firmware prints on it. Do not use GPIO 4, 5, 8, 9 or 15 (boot strapping pins; 8 also drives the RGB LED), 12 or 13 (native USB), or TX and RX (the CH343 link). Leave XDA, XCL, INT and DRDY unconnected; AD0 unconnected keeps the MPU6050 at 0x68. Most GY-521 and GY-271 boards include I2C pull-up resistors; if yours does not, add 4.7 kOhm from SDA and from SCL to 3V3 on each bus.
+
+Mount both sensor boards flat, in the same plane as the ESP32, with their printed X and Y arrows pointing the same way, and keep them away from motors, batteries, steel and magnets. Without a QMC5883L the firmware still runs, prints a warning, and reports `yaw_deg` as `nan`.
 
 **Magnetometer calibration.** After the 2 s gyro calibration, the firmware asks you to rotate the board slowly in every direction for 15 s. It takes the midpoint of each axis's range as the offset and prints it as `# mag offset`. Rotate the board through all orientations during that time, not just around one axis. Soft-iron distortion from nearby metal is not corrected.
 
 **Checking the heading direction.** Set `HEADING_SIGN` in `src/main.cpp`, then place the board flat, note `yaw_deg`, and turn it clockwise seen from above. If the value falls, set `HEADING_SIGN` to `-1.0f`. Both the magnetometer and the gyro use this sign, so they stay consistent. Heading is relative to magnetic north, and no magnetic declination is applied.
 
-`pio run -t upload`, then menu option 2 (or `python -m host.live_plot --port auto`). Port names: `COM3` style on Windows, `/dev/cu.usbserial-0001` or `/dev/cu.wchusbserial...` on macOS (use the `cu.` one), `/dev/ttyUSB0` on Linux.
+`pio run -e esp32c6 -t upload` (or `-e esp32dev` for the original ESP32), then menu option 2 (or `python -m host.live_plot --port auto`). Port names: `COM3` style on Windows, `/dev/cu.usbserial-0001` or `/dev/cu.wchusbserial...` on macOS (use the `cu.` one), `/dev/ttyUSB0` on Linux.
 
 ### Synthetic Demo
 
@@ -182,15 +181,15 @@ Menu option 1 (or `python -m host.live_plot --demo`) runs the same parser, plott
 ## Firmware Notes
 
 - **Register-level I2C (no sensor library):** checks WHO_AM_I at boot, sets ±2 g and ±250 °/s ranges, and reads all 14 data bytes in one burst so all axes share a sample instant.
-- **Fixed-rate loop** scheduled on `micros()` rather than `delay()`, so the period does not depend on execution time. Signed comparison handles counter wraparound.
+- **Fixed-rate loop** scheduled with `vTaskDelayUntil`, which wakes at absolute multiples of 10 ms, so the period does not depend on execution time. The task sleeps between samples; on the single-core C6 a busy-wait would starve the magnetometer task.
 - **Gyro bias calibration:** mean of 200 stationary samples at startup.
 - **Buffered reads:** bytes are read into an array before combining, since the evaluation order of two `Wire.read()` calls in one expression is unspecified.
 - **Filter selection:** `FUSION_EKF` (default 1) picks the EKF; set it to 0 for the complementary filter. The CSV format is identical either way.
 - **Portable filter header:** `include/imu_filter.h` has no Arduino dependencies and is compiled both for the ESP32 and for host unit tests.
-- **Two cores, two buses:** the main loop runs on core 1 and owns I2C bus 0 (MPU6050). A FreeRTOS task pinned to core 0 owns I2C bus 1 (QMC5883L) and reads it at 100 Hz. Because each bus has one user, neither core waits on the other's sensor. The cores exchange only roll, pitch and the latest heading, through a small struct guarded by a spinlock (`portENTER_CRITICAL`). Only core 1 writes to Serial, so the CSV lines never interleave. If the task stops producing headings, the yaw filter falls back to the gyro alone.
-- **Heading (yaw):** the magnetometer task tilt-compensates each reading with the latest roll and pitch from core 1. A complementary yaw filter takes the gyro's z rate for short-term motion and pulls toward the magnetometer heading over about 10 s (`YAW_TAU_S`). That keeps gyro drift bounded and keeps brief magnetic disturbances from jumping the heading.
+- **Two buses, two tasks:** the main loop (Arduino loopTask, raised to priority 2) owns I2C bus 0 and the MPU6050. A FreeRTOS task (priority 1) owns I2C bus 1 and the QMC5883L, read at 100 Hz. Each bus has one user, so no bus lock is needed. On the dual-core ESP32 the task runs on core 0 and loop() on core 1, so the sensors are read in parallel. On the single-core ESP32-C6 the two tasks interleave on one core, and the IMU task preempts the magnetometer task so its 100 Hz timing stays exact. The tasks exchange only roll, pitch and the latest heading, through a small struct guarded by a spinlock (`portENTER_CRITICAL`). Only the main loop writes to Serial, so CSV lines never interleave. If the task stops producing headings, the yaw filter falls back to the gyro alone.
+- **Heading (yaw):** the magnetometer task tilt-compensates each reading with the latest roll and pitch from the main loop. A complementary yaw filter takes the gyro's z rate for short-term motion and pulls toward the magnetometer heading over about 10 s (`YAW_TAU_S`). That keeps gyro drift bounded and keeps brief magnetic disturbances from jumping the heading.
 
-Build size with the EKF: 22.5% of flash, 6.7% of RAM.
+Build size with the EKF: ESP32-C6 24.7% of flash, 4.7% of RAM; ESP32 26.3% of flash, 7.2% of RAM.
 
 ## Blender Flight Portal
 
@@ -222,7 +221,7 @@ CI runs three jobs (the Python tests on macOS, Windows and Linux with Python 3.9
 
 - **Python (pytest):** CSV parsing and corrupt-line rejection, serial port auto-detection, accelerometer angles, τ·b bias bound, fused error below half of the best single sensor, EKF error below a quarter of the complementary filter's, EKF bias learning at 0, 0.5 and 2 °/s, combined roll and pitch, still-segment detection and hold scoring on a synthetic recording
 - **Firmware math (C++ compiler, Linux and macOS):** big-endian byte assembly including negative values, filter coefficient, initialization, bias bound, rotation tracking, EKF initialization, bias learning, rotation tracking, and combined roll and pitch
-- **Firmware build (PlatformIO):** compiles the ESP32 firmware
+- **Firmware build (PlatformIO):** compiles the firmware for both the ESP32-C6 and the ESP32
 
 ## Project Structure
 
@@ -230,8 +229,9 @@ CI runs three jobs (the Python tests on macOS, Windows and Linux with Python 3.9
 start.py                    Beginner launcher: sets up .venv, shows the menu (start.bat on Windows)
 src/main.cpp                ESP32 firmware
 include/imu_filter.h        filter math shared by firmware and host tests
-diagram.json, wokwi.toml    Wokwi circuit and simulator config
-platformio.ini              firmware build config
+diagram.json, wokwi.toml    Wokwi circuit and simulator config (original ESP32)
+figures/wiring_diagram.svg  wiring for the ESP32-C6 DevKit
+platformio.ini              firmware build config (esp32c6 and esp32dev targets)
 host/
   stream.py                 serial, Wokwi, and synthetic sources; CSV parser (9 or 10 columns)
   imu_math.py               Python port of both filters; synthetic IMU data
