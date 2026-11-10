@@ -60,10 +60,15 @@ def filter_comparison(out="figures/filter_comparison.png"):
 def plot_log(path):
     data = np.genfromtxt(path, delimiter=",", names=True)
     t = (data["t_ms"] - data["t_ms"][0]) / 1000
-    fig, axes = plt.subplots(3, 1, figsize=(11, 7), sharex=True)
-    for ax, cols, label in [(axes[0], ["ax_g", "ay_g", "az_g"], "accel (g)"),
-                            (axes[1], ["gx_dps", "gy_dps", "gz_dps"], "gyro (deg/s)"),
-                            (axes[2], ["roll_deg", "pitch_deg"], "tilt (deg)")]:
+    panels = [(["ax_g", "ay_g", "az_g"], "accel (g)"),
+              (["gx_dps", "gy_dps", "gz_dps"], "gyro (deg/s)"),
+              (["roll_deg", "pitch_deg"], "tilt (deg)")]
+    # Heading panel only when the log has yaw values (logs from before the magnetometer, or
+    # from a board without one, have no yaw_deg column or only nan).
+    if "yaw_deg" in data.dtype.names and np.isfinite(data["yaw_deg"]).any():
+        panels.append((["yaw_deg"], "heading (deg)"))
+    fig, axes = plt.subplots(len(panels), 1, figsize=(11, 2.3 * len(panels) + 0.5), sharex=True)
+    for ax, (cols, label) in zip(axes, panels):
         for c in cols:
             ax.plot(t, data[c], lw=1, label=c)
         ax.set_ylabel(label)

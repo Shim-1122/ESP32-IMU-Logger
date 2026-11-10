@@ -3,7 +3,7 @@ import itertools
 import numpy as np
 import pytest
 
-from host.analyze import filter_comparison
+from host.analyze import filter_comparison, plot_log
 from host.imu_math import ComplementaryFilter, accel_pitch, accel_roll, run_filter, synthetic_imu
 from host.stream import COLUMNS, parse_line, synthetic_lines
 
@@ -162,3 +162,22 @@ def test_compare_log_scores_both_filters_against_holds(tmp_path):
     results = compare_log(_hold_log(tmp_path, [0, 30, 45, 60]), holds=[0, 30, 45, 60])
     assert results["EKF"] < 0.5 and results["complementary"] < 1.0
     assert (tmp_path / "holds_compare.png").exists()
+
+
+def _write_log(path, header, rows):
+    path.write_text(header + "\n" + "\n".join(",".join(str(v) for v in r) for r in rows) + "\n")
+
+
+@pytest.mark.parametrize("yaw, panels", [(lambda i: 0.5 * i, 4), (lambda i: float("nan"), 3), (None, 3)])
+def test_plot_log_adds_heading_panel_only_when_yaw_is_present(tmp_path, monkeypatch, yaw, panels):
+    import matplotlib.pyplot as plt
+    created = []
+    real_subplots = plt.subplots
+    monkeypatch.setattr(plt, "subplots", lambda n, *a, **k: created.append(n) or real_subplots(n, *a, **k))
+    cols = COLUMNS if yaw is not None else COLUMNS[:-1]          # None: legacy 9-column log
+    rows = [[10 * i, 0, 0, 1, 0, 0, 0, 1.0, 2.0] + ([yaw(i)] if yaw is not None else []) for i in range(50)]
+    log = tmp_path / "imu_test.csv"
+    _write_log(log, ",".join(cols), rows)
+    plot_log(log)
+    assert created == [panels]
+    assert log.with_suffix(".png").exists()

@@ -80,10 +80,11 @@ def main():
     threading.Thread(target=reader, args=(lines, log_path), daemon=True).start()
     print(f"Logging to {log_path}. Close the window to stop.")
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(10, 9), sharex=True)
     panels = [("accel (g)", [1, 2, 3], ["x", "y", "z"]),
               ("gyro (deg/s)", [4, 5, 6], ["x", "y", "z"]),
-              ("fused tilt (deg)", [7, 8], ["roll", "pitch"])]
+              ("fused tilt (deg)", [7, 8], ["roll", "pitch"]),
+              ("heading (deg)", [9], ["yaw"])]       # nan (blank) until the magnetometer reports
     lines_by_panel = []
     for ax, (label, cols, names) in zip(axes, panels):
         lines_by_panel.append([ax.plot([], [], label=n, lw=1.2)[0] for n in names])
@@ -102,7 +103,10 @@ def main():
             for line, col in zip(plot_lines, cols):
                 line.set_data(t, data[:, col])
             ax.set_xlim(t[0], t[0] + WINDOW_S)
-            lo, hi = data[:, cols].min(), data[:, cols].max()
+            values = data[:, cols]
+            if not np.isfinite(values).any():       # e.g. heading before the first magnetometer sample
+                continue
+            lo, hi = np.nanmin(values), np.nanmax(values)
             pad = 0.1 * (hi - lo) + 1e-3
             ax.set_ylim(lo - pad, hi + pad)
         return [l for group in lines_by_panel for l in group]

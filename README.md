@@ -232,8 +232,8 @@ All host code is Python 3.9 or newer, in `host/`.
 | Module | Purpose |
 |---|---|
 | `stream.py` | Serial, Wokwi (RFC2217) and synthetic sources; CSV parser; serial port auto-detection |
-| `live_plot.py` | Real-time plot of accelerometer, gyro and fused angles; writes each session to `logs/` |
-| `analyze.py` | Plots recorded logs, regenerates the benchmark figure, and reruns both filters offline on a real log |
+| `live_plot.py` | Real-time plot of accelerometer, gyro, roll and pitch, and heading; writes each session to `logs/` |
+| `analyze.py` | Plots recorded logs (with a heading panel when the log has yaw), regenerates the benchmark figure, and reruns both filters offline on a real log |
 | `imu_math.py` | NumPy versions of both filters and the synthetic IMU generator |
 | `portal.py` | Bridge to Blender over UDP, with a live status page |
 
@@ -287,7 +287,7 @@ Both filters are rerun offline from the logged raw accelerometer and gyro column
 
 | Suite | What it checks |
 |---|---|
-| Python (pytest, `tests/`) | CSV parsing (10 columns, 9-column legacy logs, `nan` yaw, corrupt lines); port detection on Windows, macOS and Linux, including CH343 over native USB; accelerometer angles; the τ·b bias bound; fused error below half of the best single sensor; EKF error below a quarter of the complementary filter's; EKF bias learning at 0, 0.5 and 2 °/s; combined roll and pitch; still-segment detection and hold scoring; portal packets and state; Blender stick mapping, packet parsing, attitude matrix, jet construction, and flight and yaw from live UDP packets (these need `bpy` and are skipped without it) |
+| Python (pytest, `tests/`) | CSV parsing (10 columns, 9-column legacy logs, `nan` yaw, corrupt lines); log plots with and without heading; port detection on Windows, macOS and Linux, including CH343 over native USB; accelerometer angles; the τ·b bias bound; fused error below half of the best single sensor; EKF error below a quarter of the complementary filter's; EKF bias learning at 0, 0.5 and 2 °/s; combined roll and pitch; still-segment detection and hold scoring; portal packets and state; Blender stick mapping, packet parsing, attitude matrix, jet construction, and flight and yaw from live UDP packets (these need `bpy` and are skipped without it) |
 | Firmware math (C++, `tests/firmware/`) | Compiled from the same `imu_filter.h` the ESP32 uses: big-endian byte assembly, complementary filter, EKF initialization, bias learning and rotation tracking, angle wrapping, heading on level and tilted boards, heading sign, AK09916 axis mapping, and the yaw filter (initialization, tracking, bias bound, gyro-only drift, ±180° crossing) |
 | Firmware build (PlatformIO) | Compiles all three targets: `esp32c6`, `esp32dev`, `wokwi` |
 
@@ -339,7 +339,7 @@ The first time, it sets itself up: it creates a private Python environment insid
 
 | Option | What it does | What you get |
 | --- | --- | --- |
-| 1 | Live plot with simulated data | No hardware needed. Shows accelerometer, gyro and fused tilt scrolling live and saves a log in `logs/`. Close the plot window to stop |
+| 1 | Live plot with simulated data | No hardware needed. Shows accelerometer, gyro, fused tilt and heading scrolling live and saves a log in `logs/` (the simulated data has no magnetometer, so the heading panel stays empty). Close the plot window to stop |
 | 2 | Live plot from a real ESP32 | With the board plugged in by USB and running the firmware (see Appendix B). Finds the port automatically |
 | 3 | Live plot from the Wokwi simulator | With the simulator running in VS Code (see Appendix B) |
 | 4 | List the serial ports | Shows every serial port and which one looks like the ESP32 |
@@ -357,9 +357,9 @@ To use it again later, repeat step 3; setup is skipped and the menu appears in a
 | Windows: `Python was not found`, or the Microsoft Store opens | Install Python from python.org (step 1) and tick **Add python.exe to PATH**. If you already installed it without that box, run the installer again, choose **Modify**, then **Next**, and tick **Add Python to environment variables**. |
 | Windows: "Windows protected your PC" when opening start.bat | Click **More info**, then **Run anyway**. The file only runs `py start.py`; you can open it in Notepad to check. |
 | `This project needs Python 3.9 or newer` | Install the current Python from https://www.python.org/downloads/ |
-| `Could not tell which port is the ESP32` | Use a USB **data** cable (some only charge). Install the USB driver for the chip printed next to the board's USB port: CP2102 or CP2104 uses the [Silicon Labs CP210x driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers); CH340 or CH9102 uses the CH340 driver ([install guide](https://learn.sparkfun.com/tutorials/how-to-install-ch340-drivers/all)). On a Mac, allow the driver under System Settings, Privacy and Security. Then pick option 4 to check. |
+| `Could not tell which port is the ESP32` | Use a USB **data** cable (some only charge). Install the USB driver for the chip printed next to the board's USB port: CP2102 or CP2104 uses the [Silicon Labs CP210x driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers); CH340 or CH9102 uses the CH340 driver ([install guide](https://learn.sparkfun.com/tutorials/how-to-install-ch340-drivers/all)). CH343 (the ESP32-C6 DevKit) often works without installing anything; if it does not appear, install the CH343 driver from its maker, WCH. On a Mac, allow the driver under System Settings, Privacy and Security. Then pick option 4 to check. |
 | `Could not open` the port | Another program is using it. Close the Arduino IDE or PlatformIO serial monitor and try again. |
-| The plot window is blank | No data is arriving: check that the firmware is running and finished its 2 s calibration, and that the baud rate is 115200. |
+| The plot window is blank | No data is arriving yet: data starts only after calibration (2 s holding the board still, then 15 s rotating it). Check also that the firmware is running and the baud rate is 115200. |
 | `Installing libraries failed` or setup stops with an error | Check your internet connection, delete the `.venv` folder inside the project folder, and start again. (On a Mac the folder is hidden: press Cmd+Shift+. in Finder to show it.) |
 | A figure did not open by itself | Look in the project's `figures` folder. |
 
