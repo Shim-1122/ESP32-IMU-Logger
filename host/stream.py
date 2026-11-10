@@ -5,26 +5,36 @@ import numpy as np
 
 from .imu_math import AttitudeEKF, synthetic_imu
 
-COLUMNS = ["t_ms", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps", "roll_deg", "pitch_deg"]
+COLUMNS = ["t_ms", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps", "roll_deg", "pitch_deg", "yaw_deg"]
+# Logs from firmware before the magnetometer was added have no yaw column.
+LEGACY_COLUMNS = len(COLUMNS) - 1
 
 
 def parse_line(line: str):
-    """One CSV line from the firmware -> array of 9 floats.
+    """One CSV line from the firmware -> array of len(COLUMNS) floats.
+    Lines with the older 9 columns (no yaw) are accepted, with yaw set to NaN.
     Comment lines ('#'), blank lines, and lines corrupted in transit return None."""
     line = line.strip()
     if not line or line.startswith("#"):
         return None
     parts = line.split(",")
-    if len(parts) != len(COLUMNS):
+    if len(parts) not in (LEGACY_COLUMNS, len(COLUMNS)):
         return None
     try:
-        return np.array(parts, dtype=float)
+        values = np.array(parts, dtype=float)
     except ValueError:
         return None
+    if len(parts) == LEGACY_COLUMNS:
+        values = np.append(values, np.nan)
+    return values
 
 
-USB_SERIAL_HINTS = ("cp210", "ch340", "ch341", "ch910", "ch9102", "ftdi", "usb serial", "usb-serial", "usb to uart",
-                    "uart", "slab", "usbserial", "usbmodem", "wchusbserial", "ttyusb", "ttyacm", "jtag")
+USB_SERIAL_HINTS = ("cp210", "ch340", "ch341", "ch343", "ch910", "ch9102", "ftdi", "usb serial", "usb-serial",
+                    "usb single serial", "usb to uart", "uart", "slab", "usbserial", "usbmodem", "wchusbserial",
+                    "ttyusb", "ttyacm")
+# The chip's own USB port (USB JTAG/serial on the ESP32-C6, S3, C3). The firmware prints on the
+# USB-to-UART chip instead (CH343 on the C6 DevKit), so these rank below a USB-serial chip.
+NATIVE_USB_HINTS = ("jtag",)
 NOT_A_BOARD_HINTS = ("bluetooth", "debug-console", "wlan-debug")
 
 
@@ -37,15 +47,22 @@ def list_serial_ports():
 def pick_serial_port(ports):
     """Best guess at the ESP32 among (device, description) pairs, or None if it is unclear.
 
-    Windows names ports COM3, COM4, ...; macOS /dev/cu.usbserial-XXXX, /dev/cu.SLAB_USBtoUART or
-    /dev/cu.wchusbserialXXXX (the cu. device, not tty.); Linux /dev/ttyUSB0 or /dev/ttyACM0.
+    Windows names ports COM3, COM4, ...; macOS /dev/cu.usbserial-XXXX, /dev/cu.SLAB_USBtoUART,
+    /dev/cu.wchusbserialXXXX or /dev/cu.usbmodemXXXX (the cu. device, not tty.); Linux /dev/ttyUSB0
+    or /dev/ttyACM0. With both USB ports of an ESP32-C6 DevKit plugged in, the CH343 port wins over
+    the chip's native USB JTAG/serial port.
     """
     scored = []
     for dev, desc in ports:
         text = f"{dev} {desc}".lower()
         if any(h in text for h in NOT_A_BOARD_HINTS):
             continue
-        score = 2 if any(h in text for h in USB_SERIAL_HINTS) else 0
+        if any(h in text for h in NATIVE_USB_HINTS):
+            score = 1
+        elif any(h in text for h in USB_SERIAL_HINTS):
+            score = 2
+        else:
+            score = 0
         if dev.startswith("/dev/tty."):        # macOS lists each port twice; the cu. one is right
             score -= 1
         if dev.startswith("/dev/ttyS"):        # Linux built-in serial ports, never the board
@@ -83,5 +100,6 @@ def synthetic_lines(fs: int = 100, realtime: bool = True):
         roll, pitch = f.update(accel[i], gyro[i])
         if realtime:
             time.sleep(max(0.0, start + k / fs - time.perf_counter()))
+        # The simulator has no magnetometer, so yaw is reported as nan (the same as a board without one).
         yield (f"{int(k * 1000 / fs)},{accel[i, 0]:.4f},{accel[i, 1]:.4f},{accel[i, 2]:.4f},"
-               f"{gyro[i, 0]:.3f},{gyro[i, 1]:.3f},{gyro[i, 2]:.3f},{roll:.2f},{pitch:.2f}\n")
+               f"{gyro[i, 0]:.3f},{gyro[i, 1]:.3f},{gyro[i, 2]:.3f},{roll:.2f},{pitch:.2f},nan\n")

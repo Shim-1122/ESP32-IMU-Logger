@@ -1,4 +1,4 @@
-// Tilt estimation math for a 6-axis IMU (accelerometer + gyroscope).
+// Attitude and heading math (accel, gyro, magnetometer).
 //
 // No Arduino dependencies: the same code is compiled for the ESP32 and for the
 // host unit tests (tests/firmware/).
@@ -202,6 +202,55 @@ class AttitudeEKF {
   float q_[4];
   float x_[4] = {0, 0, 0, 0};
   float P_[4][4];
+  bool initialized_ = false;
+};
+
+// ------------------------------------------------------------ heading (yaw)
+// wrap to [-180, 180)
+inline float wrap180(float deg) {
+  float w = std::fmod(deg + 180.0f, 360.0f);
+  if (w < 0.0f) w += 360.0f;
+  return w - 180.0f;
+}
+
+// ICM-20948 mag -> accel frame. AK09916 is x fwd, y right, z down; accel/gyro x fwd, y left, z up.
+inline Vec3 ak09916ToImuFrame(const Vec3& m) { return {m.x, -m.y, -m.z}; }
+
+// Tilt-compensated heading, deg in [-180, 180). m: offset-removed mag, accel frame (any units).
+// Projects the field onto the horizontal plane. 0 = +x at magnetic north, CCW-positive; sign -1 = CW.
+inline float magHeadingDeg(const Vec3& m, float rollDeg, float pitchDeg, float sign = 1.0f) {
+  const float phi = rollDeg / RAD_TO_DEG_F, theta = pitchDeg / RAD_TO_DEG_F;
+  const float sp = std::sin(phi), cp = std::cos(phi), st = std::sin(theta), ct = std::cos(theta);
+  const float xh = m.x * ct + m.y * sp * st + m.z * cp * st;  // horizontal x
+  const float yh = m.y * cp - m.z * sp;                       // horizontal y
+  return wrap180(sign * std::atan2(-yh, xh) * RAD_TO_DEG_F);
+}
+
+// Yaw complementary filter: gyro z short-term, mag heading long-term (long tau: mag is noisy near metal).
+//     yaw = alpha * (yaw + gz * dt) + (1 - alpha) * mag_heading,  alpha = tau / (tau + dt)
+// Angles wrapped the short way round. sign must match magHeadingDeg's.
+class YawFilter {
+ public:
+  YawFilter(float tau_s, float dt_s, float sign = 1.0f) : alpha_(tau_s / (tau_s + dt_s)), dt_(dt_s), sign_(sign) {}
+
+  // gz: deg/s, bias removed. magHeading: deg, used only if magValid
+  void update(float gz_dps, float magHeading, bool magValid) {
+    if (!initialized_) {  // start from mag (absolute)
+      if (!magValid) return;
+      yaw_ = magHeading;
+      initialized_ = true;
+      return;
+    }
+    yaw_ = wrap180(yaw_ + sign_ * gz_dps * dt_);
+    if (magValid) yaw_ = wrap180(yaw_ + (1.0f - alpha_) * wrap180(magHeading - yaw_));
+  }
+
+  float yaw() const { return yaw_; }
+  bool initialized() const { return initialized_; }
+
+ private:
+  float alpha_, dt_, sign_;
+  float yaw_ = 0.0f;
   bool initialized_ = false;
 };
 
