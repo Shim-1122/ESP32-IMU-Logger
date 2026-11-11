@@ -1,48 +1,22 @@
-# ESP32 IMU Logger: 9-Axis Attitude and Heading Estimation on the ESP32-C6
+# ESP32 IMU Logger
 
 ![Tests](https://github.com/Shim-1122/ESP32-IMU-Logger/actions/workflows/tests.yml/badge.svg)
 
-**Technical report.** Author: Shyam Iyer. License: MIT.
+Real-time roll, pitch and heading from an ESP32-C6 and an ICM-20948 9-axis IMU, streamed to a Python plotter and used to fly a jet in Blender.
 
-## Abstract
+I started this to compare a complementary filter against an extended Kalman filter (EKF) on real IMU data, then grew it into a full attitude and heading reference: register-level sensor drivers (no libraries), an EKF that learns gyro bias, tilt-compensated magnetometer heading, and a Blender scene you fly by tilting the board. On a simulated benchmark the EKF gets **0.25° RMS** tilt error, against 2.55° for the complementary filter and 9.3° for the accelerometer alone.
 
-This project estimates the full orientation of a hand-held board (roll, pitch and heading) in real time and uses it to fly a 3D aircraft in Blender. An ESP32-C6 microcontroller reads a TDK InvenSense ICM-20948 9-axis IMU (accelerometer, gyroscope and AK09916 magnetometer) over I2C with register-level drivers and no sensor libraries. Roll and pitch come from an extended Kalman filter (EKF) that also learns the residual gyro bias. Heading comes from a tilt-compensated magnetometer reading fused with the gyro's yaw rate. The firmware runs as two FreeRTOS tasks sharing one I2C bus and streams CSV at 100 Hz over USB. A Python host plots and logs the stream, scores the filters offline, and forwards orientation to Blender over UDP. On a simulated benchmark with known ground truth the EKF's RMS tilt error is 0.25°, against 2.55° for a complementary filter and 9.3° for the accelerometer alone. The firmware also builds for the original dual-core ESP32 and for the Wokwi simulator.
+**Contents:** [How it works](#how-it-works) · [Hardware](#hardware) · [Firmware](#firmware) · [Host software](#host-software) · [Blender](#blender) · [Results and testing](#results-and-testing) · [Limitations and next steps](#limitations-and-next-steps) · [Appendices](#appendix-a-setup-guide)
 
-## Contents
+## How it works
 
-1. [Introduction](#1-introduction)
-2. [System Overview](#2-system-overview)
-3. [Hardware](#3-hardware)
-4. [Firmware](#4-firmware)
-5. [Host Software](#5-host-software)
-6. [3D Visualization in Blender](#6-3d-visualization-in-blender)
-7. [Verification](#7-verification)
-8. [Limitations and Future Work](#8-limitations-and-future-work)
-- [Appendix A: Setup Guide](#appendix-a-setup-guide)
-- [Appendix B: Building, Flashing and Simulating](#appendix-b-building-flashing-and-simulating)
-- [Appendix C: Serial Protocol](#appendix-c-serial-protocol)
-- [Appendix D: Configuration Constants](#appendix-d-configuration-constants)
-- [Appendix E: Project Structure](#appendix-e-project-structure)
+No single motion sensor gives you orientation on its own:
 
-## 1. Introduction
+- **Gyroscope:** smooth, but integrating its rate drifts forever, since any bias keeps adding up.
+- **Accelerometer:** knows which way is down, so roll and pitch don't drift, but it's noisy and can't tell gravity from a moving hand.
+- **Magnetometer:** gives heading, but only once you correct for tilt, and nearby metal throws it off.
 
-Motion-based control replaces a joystick with the orientation of an object the user holds. It is the core of human-machine interfaces such as prosthetic control, rehabilitation tracking and gesture input. Orientation cannot be measured by any one inertial sensor alone:
-
-- A **gyroscope** measures angular rate. Integrating it gives smooth angles that drift without bound, because any bias integrates into a growing error.
-- An **accelerometer** measures gravity and so gives absolute roll and pitch, but it is noisy and cannot tell gravity from the acceleration of a moving hand.
-- A **magnetometer** measures the Earth's field and so gives absolute heading, but only when the reading is corrected for tilt, and it is disturbed by nearby metal.
-
-Sensor fusion combines them so each covers the others' weaknesses.
-
-**Objectives**
-
-1. Estimate roll, pitch and heading at 100 Hz on a low-cost microcontroller, with bounded drift.
-2. Quantify the gain from an EKF over a complementary filter against known ground truth.
-3. Stream the estimate to a host for plotting, logging and offline analysis.
-4. Drive a 3D model in real time from the estimate.
-5. Keep the code verifiable: shared filter code between firmware and host tests, and CI on every push.
-
-## 2. System Overview
+Fusing them lets each cover the others' weak spots.
 
 ```mermaid
 flowchart LR
@@ -71,18 +45,16 @@ flowchart LR
 | Host | `host/` (Python) | Port detection, parsing, live plot, logging, offline analysis, UDP bridge |
 | Visualization | `blender/aircraft_control.py` | Procedural jet whose attitude and position follow the board |
 
-## 3. Hardware
-
-### 3.1 Bill of Materials
+## Hardware
 
 | Part | Notes |
 |---|---|
-| ESP32-C6 DevKit with CH343 USB serial | The board this report targets: one RISC-V core, two USB-C ports (CH343 and native USB). An original ESP32 DevKit also works (Appendix B). |
+| ESP32-C6 DevKit with CH343 USB serial | One RISC-V core, two USB-C ports (CH343 and native USB). An original ESP32 DevKit also works (Appendix B). |
 | ICM-20948 breakout board | Any 3.3 V I2C breakout (for example Adafruit 4554 or SparkFun 15335). The AK09916 magnetometer is inside the same package. |
 | 4 jumper wires, or a Qwiic / STEMMA QT cable | 3V3, GND, SDA, SCL |
 | USB-C data cable | Some cables only charge |
 
-### 3.2 Wiring
+### Wiring
 
 ![Wiring diagram](figures/wiring_diagram.svg)
 
@@ -94,11 +66,11 @@ flowchart LR
 | SCL | GPIO 22 | GPIO 22 |
 | AD0, INT, FSYNC | not connected | not connected |
 
-The pin order on ICM-20948 boards differs between makers, so match the printed labels. Boards with a Qwiic or STEMMA QT connector can use a cable that ends in jumper wires. Most breakout boards already have I2C pull-up resistors. If yours does not, add 4.7 kΩ from SDA to 3V3 and from SCL to 3V3. The diagram is generated by `tools/wiring_diagram.py`.
+Pin order varies between ICM-20948 boards, so go by the printed labels. Most breakouts already have I2C pull-ups; if yours doesn't, add 4.7 kΩ from SDA and SCL to 3V3. The diagram comes from `tools/wiring_diagram.py`.
 
-**USB.** Plug in the USB-C port marked **CH343**. The firmware prints on UART0, which the CH343 chip bridges to USB. The other port, marked ESP32C6, is the chip's native USB.
+Use the USB-C port marked **CH343**. That's where the firmware prints (UART0 through the CH343 chip); the other port is the C6's native USB.
 
-### 3.3 Pin Selection on the ESP32-C6
+**Why these pins:**
 
 | Pins | Why they are avoided or used |
 |---|---|
@@ -107,15 +79,13 @@ The pin order on ICM-20948 boards differs between makers, so match the printed l
 | GPIO 12, 13 | Native USB D− and D+ |
 | TX, RX (GPIO 16, 17) | UART0 link to the CH343, used for the CSV stream |
 
-### 3.4 Sensor Frame and Mounting
+**Axes.** The accel and gyro use **+x forward, +y left, +z up**. The magnetometer die inside the chip has y and z flipped, so the firmware converts it before using it. Mount the board flat and away from motors, batteries, steel and magnets.
 
-The accelerometer and gyroscope use a right-handed frame: **+x forward, +y left, +z up** out of the chip's top face. The AK09916 magnetometer die inside the package is mounted with its y and z axes reversed (+x forward, +y right, +z down), and the firmware converts it into the accelerometer's frame (Section 4.5). Mount the board flat, in the same plane as the ESP32-C6, and keep it away from motors, batteries, steel and magnets, all of which bend the local magnetic field.
+## Firmware
 
-## 4. Firmware
+### Two tasks on one core
 
-### 4.1 Task Architecture
-
-The ESP32-C6 has one high-performance core, so the firmware is split into two FreeRTOS tasks that interleave on it:
+The C6 has a single main core, so the work is split into two FreeRTOS tasks that take turns:
 
 | Task | Priority | Rate | Work |
 |---|---|---|---|
@@ -136,15 +106,15 @@ sequenceDiagram
   L->>L: yaw filter, print CSV line
 ```
 
-- **Timing.** Both tasks wake with `vTaskDelayUntil`, which sleeps until absolute multiples of the period. The rate does not depend on execution time, and the tick is 1 kHz, so the 10 ms period is exact. The tasks sleep between samples. On a single core a busy-wait would starve the other task and the idle task.
-- **Priority.** `loop()` runs at priority 2, so IMU sampling preempts the magnetometer task and keeps its timing.
-- **Bus sharing.** The ICM-20948 and its AK09916 share one I2C bus, so each transaction takes a FreeRTOS mutex. The mutex uses priority inheritance: if the magnetometer task holds the bus when `loop()` wakes, it is raised to finish its transfer, about 0.3 ms, at once.
-- **Shared data.** The tasks exchange only roll, pitch and the latest heading, through a small struct guarded by a spinlock (`portENTER_CRITICAL`). A sequence number marks each new heading, so `loop()` only uses a heading that is new since the last sample.
-- **On the dual-core ESP32** the same code puts `magTask` on core 0 and `loop()` on core 1, so the two tasks compute in parallel and only the bus transfers are serialized.
+- Both tasks wake with `vTaskDelayUntil`, so the 10 ms period stays exact and they sleep in between. A busy-wait on a single core would starve the other task.
+- `loop()` has the higher priority, so IMU timing never slips.
+- Both sensors share one I2C bus behind a mutex. Priority inheritance means a magnetometer read in progress (about 0.3 ms) finishes right away when `loop()` needs the bus.
+- The tasks only swap roll, pitch and the latest heading, through a small spinlock-guarded struct. A sequence number tells `loop()` whether a heading is new.
+- On the dual-core ESP32 the same code runs the two tasks on separate cores, truly in parallel.
 
-### 4.2 ICM-20948 Configuration
+### ICM-20948 setup
 
-Register level, with the register map checked against the ICM-20948 datasheet values used by SparkFun's driver and PX4. Registers are split into four banks selected by `REG_BANK_SEL` (0x7F, bank number in bits 5:4).
+Everything is register level. I checked the register map against the datasheet values in SparkFun's driver and in PX4. Registers live in four banks selected by `REG_BANK_SEL` (0x7F, bits 5:4).
 
 | Step | Register | Value | Effect |
 |---|---|---|---|
@@ -160,42 +130,39 @@ Register level, with the register map checked against the ICM-20948 datasheet va
 | Accel range and filter | ACCEL_CONFIG (bank 2, 0x14) | 0x19 | ±2 g (16384 LSB per g), low-pass about 50 Hz |
 | Magnetometer | AK09916 WIA2 (0x01), CNTL3 (0x32), CNTL2 (0x31) | expect 0x09; 0x01; 0x08 | Check ID, soft reset, continuous mode at 100 Hz |
 
-The output rate (225 Hz) is above twice the 100 Hz sampling rate, and the low-pass filter removes content above about 50 Hz, so sampling at 100 Hz does not alias. Each sample is one 12-byte burst read from ACCEL_XOUT_H (0x2D), so all six axes come from the same instant. Each magnetometer read is one 9-byte burst from ST1 (0x10) to ST2 (0x18). ST1 says whether a new sample is ready, ST2 flags magnetic overflow, and reading ST2 tells the chip the sample has been taken.
+225 Hz output with a ~50 Hz low-pass means sampling at 100 Hz doesn't alias. Each IMU sample is one 12-byte burst so all six axes come from the same instant. Each magnetometer read is one 9-byte burst from ST1 to ST2; ST1 says a sample is ready, ST2 flags overflow, and reading ST2 releases the sample.
 
-### 4.3 Startup and Calibration
+### Calibration at startup
 
-1. **Gyro bias, 2 s, board still.** The mean of 200 samples is the bias, subtracted from every later reading. Any bias left over is learned by the EKF (Section 4.4).
-2. **Magnetometer hard-iron offset, 15 s, rotate the board in every direction.** Fixed magnetic fields carried with the board (magnets, magnetized parts) shift every reading by a constant. The firmware records the minimum and maximum on each axis and takes the midpoint as the offset. The board must be turned through all orientations for the range to be complete.
-3. The task starts and CSV output begins. The header line and all status messages start with `#`.
+1. **Hold still for 2 s.** The average gyro reading is its bias, subtracted from then on. The EKF learns whatever's left.
+2. **Rotate in every direction for 15 s.** Magnets and magnetized parts on the board shift every magnetometer reading by a constant. The midpoint of each axis's min and max is that offset (hard-iron calibration).
+3. CSV output starts. Status lines start with `#`.
 
-### 4.4 Attitude Estimation (Roll and Pitch)
+### Roll and pitch
 
-Two filters share the same interface in `include/imu_filter.h`. `FUSION_EKF` selects one at compile time, and the CSV format is the same either way.
+Both filters live in `include/imu_filter.h`; `FUSION_EKF` picks one at compile time and the CSV is the same either way.
 
-**Complementary filter (baseline)**
+**Complementary filter (the baseline):**
 
 ```
 angle = α · (angle + gyro_rate · dt) + (1 − α) · accel_angle,     α = τ / (τ + dt)
 ```
 
-τ = 0.5 s and dt = 10 ms give α = 0.980. Content faster than τ comes from the gyro and slower content from the accelerometer. A constant gyro bias b leaves a bounded steady error of τ·b, compared with unbounded drift for pure integration.
+With τ = 0.5 s and dt = 10 ms, α = 0.980: fast motion comes from the gyro, slow drift is corrected by the accelerometer. A constant gyro bias b leaves a fixed error of τ·b instead of unbounded drift.
 
-**Extended Kalman filter (default)**
+**Extended Kalman filter (the default):** state `x = [roll, pitch, b_x, b_y]`, the two angles plus gyro bias on each tilt axis.
 
-State `x = [roll, pitch, b_x, b_y]`: the two angles plus the gyro bias on each tilt axis.
-
-- **Predict:** full Euler-angle kinematics driven by the bias-corrected gyro, `roll' = p + sin(roll)·tan(pitch)·q + cos(roll)·tan(pitch)·r` and `pitch' = cos(roll)·q − sin(roll)·r`, linearized analytically for the covariance update.
+- **Predict:** full Euler-angle kinematics from the bias-corrected gyro, `roll' = p + sin(roll)·tan(pitch)·q + cos(roll)·tan(pitch)·r` and `pitch' = cos(roll)·q − sin(roll)·r`, linearized analytically for the covariance.
 - **Update:** the accelerometer measures gravity in the body frame, `h(x) = [−sin(pitch), sin(roll)·cos(pitch), cos(roll)·cos(pitch)]`.
-- **Adaptive measurement noise:** `R = σ²_a + k·(|a| − 1 g)²`, so the filter trusts the accelerometer less while the board is accelerating. This removes the complementary filter's lag and overshoot during fast motion.
-- **Parameters:** gyro noise 0.3 °/s, bias random walk 0.01 °/s, accelerometer noise 0.05 g, dynamic gain k = 10.
+- **Adaptive noise:** `R = σ²_a + k·(|a| − 1 g)²`, so it trusts the accelerometer less while the board is accelerating. That removes the complementary filter's lag and overshoot during fast moves.
+- **Tuning:** gyro noise 0.3 °/s, bias random walk 0.01 °/s, accelerometer noise 0.05 g, k = 10.
 
-Compared with the complementary filter, the EKF estimates the residual bias (0.52 °/s learned against 0.50 °/s true) instead of leaving a τ·b offset, makes no small-angle approximation, and rejects linear acceleration instead of passing it through. The same filter exists in single-precision C++ for the ESP32 and in NumPy (`host/imu_math.py`); both give 0.25° RMS on the benchmark.
+The EKF learns the leftover bias (0.52 °/s estimated vs 0.50 °/s true), needs no small-angle approximation, and ignores linear acceleration. The same filter exists in C++ for the ESP32 and in NumPy (`host/imu_math.py`); both hit 0.25° RMS on the benchmark.
 
-### 4.5 Heading Estimation (Yaw)
+### Heading
 
-**Axis mapping.** The AK09916 reading is converted into the accelerometer's frame by reversing y and z, `m = (m_x, −m_y, −m_z)` (`imu::ak09916ToImuFrame`), and the hard-iron offset is removed.
-
-**Tilt compensation.** A magnetometer gives heading only when level. With roll φ and pitch θ from the attitude filter, the field is projected onto the horizontal plane:
+1. **Axis fix:** convert the magnetometer reading to the accel frame by flipping y and z (`imu::ak09916ToImuFrame`), then remove the hard-iron offset.
+2. **Tilt compensation:** a compass only works level, so project the field onto the horizontal plane using roll φ and pitch θ:
 
 ```
 x_h = m_x·cos θ + m_y·sin φ·sin θ + m_z·cos φ·sin θ
@@ -203,7 +170,7 @@ y_h = m_y·cos φ − m_z·sin φ
 ψ_mag = atan2(−y_h, x_h)
 ```
 
-**Fusion with the gyro.** The magnetometer heading is absolute but noisy and disturbed by nearby metal; the integrated gyro z rate is smooth but drifts. A complementary yaw filter combines them, with every angle difference wrapped the short way round so that crossing ±180° does not spin the estimate:
+3. **Blend with the gyro:** the magnetometer is absolute but noisy near metal; the gyro is smooth but drifts. A complementary yaw filter combines them, wrapping angles the short way round so crossing ±180° doesn't spin it:
 
 ```
 yaw ← wrap(yaw + g_z·dt)                          every sample
@@ -211,13 +178,11 @@ yaw ← wrap(yaw + (1 − α)·wrap(ψ_mag − yaw))       when a new heading ha
 α = τ / (τ + dt),  τ = 10 s
 ```
 
-The long time constant means a brief magnetic disturbance moves the heading little, while drift stays bounded. Until the first magnetometer sample, yaw is reported as `nan`.
+The 10 s time constant means a brief magnetic disturbance barely moves the heading. Yaw reads `nan` until the first magnetometer sample.
 
-**Convention.** Yaw follows the right-hand rule about +z (up). It is 0 when the board's +x axis points at magnetic north and increases as the board turns **counterclockwise** seen from above. `HEADING_SIGN = -1` gives a clockwise compass heading instead. No magnetic declination is applied, so the reference is magnetic, not true, north.
+**Convention:** yaw is 0 when +x points at magnetic north and increases **counterclockwise** seen from above. Set `HEADING_SIGN = -1` for a clockwise compass heading. No declination correction, so it's magnetic north, not true north.
 
-### 4.6 Output and Resource Use
-
-Each sample is one CSV line (Appendix C). Build sizes with the EKF:
+### Build size (with the EKF)
 
 | Target | Flash | RAM |
 |---|---|---|
@@ -225,9 +190,9 @@ Each sample is one CSV line (Appendix C). Build sizes with the EKF:
 | Original ESP32 (`esp32dev`) | 26.4% | 7.2% |
 | Wokwi simulation (`wokwi`) | 26.2% | 7.2% |
 
-## 5. Host Software
+## Host software
 
-All host code is Python 3.9 or newer, in `host/`.
+Python 3.9+, in `host/`:
 
 | Module | Purpose |
 |---|---|
@@ -237,32 +202,30 @@ All host code is Python 3.9 or newer, in `host/`.
 | `imu_math.py` | NumPy versions of both filters and the synthetic IMU generator |
 | `portal.py` | Bridge to Blender over UDP, with a live status page |
 
-**Parsing.** Comment lines (`#`) and lines corrupted in transit are skipped. Logs recorded before the magnetometer was added have 9 columns and still load, with yaw filled as `nan`.
+- The parser skips `#` lines and corrupted lines. Old 9-column logs (from before the magnetometer) still load, with yaw as `nan`.
+- Port auto-detect knows the common USB-serial chips (CP210x, CH340, CH343, CH9102, FTDI). With both C6 USB ports plugged in, it picks the CH343.
+- `python -m host.portal --port auto` sends each sample to Blender as UDP JSON on 127.0.0.1:5005, like `{"roll": 12.3, "pitch": -4.5, "yaw": 87.0, "t_ms": 12345}`, and shows live values at http://127.0.0.1:8080. `--demo` uses fake data; `--reset` re-centres the jet.
 
-**Port detection.** The host recognizes common USB-serial chips (CP210x, CH340, CH343, CH9102, FTDI) on Windows, macOS and Linux. On the ESP32-C6 DevKit both USB ports may be connected; the CH343 port is preferred over the chip's native USB JTAG port, since the firmware prints on the CH343.
+## Blender
 
-**Portal.** `python -m host.portal --port auto` reads the stream and sends each sample as one UDP packet to 127.0.0.1:5005, for example `{"roll": 12.3, "pitch": -4.5, "yaw": 87.0, "t_ms": 12345}`. `yaw` is left out until the firmware reports a heading. A status page at http://127.0.0.1:8080 shows live roll, pitch and heading. `--demo` uses simulated data and `--reset` sends `{"reset": true}`.
+`blender/aircraft_control.py` runs in Blender's Text Editor. If there's no object called `Aircraft`, it builds a simple jet out of primitives, so there's no model to download or license.
 
-## 6. 3D Visualization in Blender
+About 60 times a second it reads the newest packet, smooths it, and:
 
-`blender/aircraft_control.py` runs in Blender's Text Editor. If no object named `Aircraft` exists, it builds a jet from primitives (fuselage, nose cone, wings, tailplane, fin, nozzle, canopy) parented to one empty, so no third-party model or licence is involved.
+- **Rotates the jet:** `R = Rz(yaw) · Rx(pitch) · Ry(roll)`, so roll and pitch are about the jet's own axes and heading is about world vertical. Building it from matrices avoids Euler-angle axis-order bugs.
+- **Moves the jet:** tilt past 3° and it slides sideways (roll) or climbs and dives (pitch) at 0.6 m/s per degree past the deadband. Hold the board level and it stays put.
 
-About 60 times a second the script reads the newest packet, smooths it (`SMOOTHING`), and:
+`ROLL_SIGN`, `PITCH_SIGN` and `YAW_SIGN` flip directions if it moves the wrong way.
 
-- **Sets attitude** as `R = Rz(yaw) · Rx(pitch) · Ry(roll)`: roll and pitch about the jet's own axes, then heading about the world vertical. Composing matrices avoids the axis-order errors of Euler angles. Yaw smoothing is wrap-aware.
-- **Moves the jet:** tilt past a 3° deadband slides it sideways (roll) or climbs and descends it (pitch), at 0.6 m/s per degree past the deadband, within fixed limits. A level board holds position.
+**To run it:** open the script in Blender's Text Editor and hit Run Script, then start `python -m host.portal --port auto` (or `--demo`).
 
-`ROLL_SIGN`, `PITCH_SIGN` and `YAW_SIGN` flip directions to suit how the board is held.
+## Results and testing
 
-**Running it:** open `blender/aircraft_control.py` in Blender's Text Editor and press Run Script; start `python -m host.portal --port auto` (or `--demo`); optionally open http://127.0.0.1:8080.
-
-## 7. Verification
-
-### 7.1 Simulation Benchmark
+### Simulation benchmark
 
 ![Filter Comparison](figures/filter_comparison.png)
 
-Synthetic data with known ground truth: sensor 30 cm from a pivot; stationary, a 30° tilt and return, then a 1 Hz ±20° swing. The gyro has 0.5 °/s residual bias plus white noise. The accelerometer has white noise plus tangential acceleration during the swing.
+Simulated sensor 30 cm from a pivot: still, a 30° tilt and back, then a 1 Hz ±20° swing. The gyro has 0.5 °/s bias plus noise; the accelerometer has noise plus the swing's tangential acceleration.
 
 | Estimate | RMS Error (deg) |
 |---|---|
@@ -271,19 +234,19 @@ Synthetic data with known ground truth: sensor 30 cm from a pivot; stationary, a
 | Complementary filter | 2.55 |
 | **Extended Kalman filter** | **0.25** |
 
-Regenerate with `python -m host.analyze --simulate`.
+Rebuild it with `python -m host.analyze --simulate`.
 
-### 7.2 Real-Hardware Test Procedure
+### Testing on real hardware
 
-1. Record a session (menu option 2, or `python -m host.live_plot --port auto`). Keep the board still for the 2 s calibration, then rotate it in every direction for the 15 s magnetometer calibration.
-2. Hold the board still at known pitch angles, in order, for 3 s or more each (for example 0°, 30°, 45°, 60° on a 3D-printed wedge or against a protractor), moving smoothly between holds.
+1. Record a session (menu option 2, or `python -m host.live_plot --port auto`). Hold still for the 2 s calibration, then rotate for the 15 s magnetometer calibration.
+2. Hold the board at known pitch angles for 3 s or more each, in order (for example 0°, 30°, 45°, 60° against a protractor or a printed wedge).
 3. Run `python -m host.analyze --compare logs/imu_YYYYMMDD_HHMMSS.csv --holds 0,30,45,60`.
 
-Both filters are rerun offline from the logged raw accelerometer and gyro columns. Each still segment is matched to the next hold angle, and the per-hold error and RMS for each filter are printed and plotted to a `_compare.png` next to the log.
+This reruns both filters on the logged raw data, matches each still segment to a hold angle, and prints and plots the error for each filter (saved as `_compare.png` next to the log).
 
-**Heading check.** Lay the board flat with +x toward magnetic north (from a phone compass): `yaw_deg` should read near 0. Turn it 90° counterclockwise seen from above: it should read near +90.
+**Heading check:** lay the board flat with +x toward magnetic north (use a phone compass) and `yaw_deg` should read about 0. Turn it 90° counterclockwise and it should read about +90.
 
-### 7.3 Automated Tests
+### Automated tests
 
 | Suite | What it checks |
 |---|---|
@@ -291,26 +254,24 @@ Both filters are rerun offline from the logged raw accelerometer and gyro column
 | Firmware math (C++, `tests/firmware/`) | Compiled from the same `imu_filter.h` the ESP32 uses: big-endian byte assembly, complementary filter, EKF initialization, bias learning and rotation tracking, angle wrapping, heading on level and tilted boards, heading sign, AK09916 axis mapping, and the yaw filter (initialization, tracking, bias bound, gyro-only drift, ±180° crossing) |
 | Firmware build (PlatformIO) | Compiles all three targets: `esp32c6`, `esp32dev`, `wokwi` |
 
-### 7.4 Continuous Integration
+GitHub Actions runs all of this on every push: Python tests on Ubuntu 24.04, macOS and Windows (Python 3.9 and 3.13), the C++ tests on Ubuntu and macOS, and every firmware build. Ubuntu is pinned to 24.04 because newer images don't have Python 3.9.
 
-GitHub Actions runs on every push and pull request: the Python tests on Ubuntu 24.04, macOS and Windows with Python 3.9 and 3.13 (through the beginner launcher `start.py`); the C++ firmware math tests on Ubuntu and macOS; and the PlatformIO build of every target. The Ubuntu runner is pinned to 24.04 because Python 3.9 is not available for setup on newer Ubuntu images.
+## Limitations and next steps
 
-## 8. Limitations and Future Work
+**Known limits:**
 
-**Limitations**
+- **Not yet run on real hardware.** The ICM-20948 firmware compiles for every target and the math is unit-tested, but I haven't flashed it to a board yet.
+- **Gimbal lock:** the EKF uses tan(pitch), so it degrades near ±90° pitch.
+- **Magnetometer calibration** handles hard-iron offsets only, not soft-iron distortion, and there's no declination correction.
+- **Yaw gyro bias** isn't learned (the EKF only tracks x and y), so a leftover z bias b_z causes a steady heading offset of about 10 s × b_z.
+- **Wokwi** has no ICM-20948, so the simulator build uses an MPU6050 and has no heading.
 
-- **Hardware validation.** The ICM-20948 firmware has been compiled for all targets and its math unit-tested, but it has not yet been run on a physical board. The register sequence follows the datasheet values used by SparkFun's driver and PX4.
-- **Euler-angle singularity.** The EKF's kinematics contain tan(pitch), so accuracy degrades near ±90° pitch (gimbal lock).
-- **Magnetometer calibration** corrects hard-iron offsets only. Soft-iron distortion (field bending by nearby metal) is not corrected, and no declination is applied.
-- **Yaw-axis gyro bias.** The EKF learns bias on x and y only. A residual z bias b_z leaves a steady heading offset of about τ·b_z (10 s × b_z).
-- **Simulation.** Wokwi has no ICM-20948, so the simulated build uses an MPU6050 and has no heading.
+**Next steps:**
 
-**Future work**
-
-1. A single 9-axis estimator: a quaternion (multiplicative) EKF with the magnetometer as a measurement, estimating all three gyro biases. This removes the gimbal lock and the separate yaw filter.
-2. Ellipsoid fitting for soft-iron magnetometer calibration, stored in flash so the 15 s rotation is needed only once.
-3. Hardware validation against a reference (a motion-capture system or a rotary stage) and a heading accuracy figure.
-4. Wireless streaming over the ESP32-C6's Wi-Fi or Bluetooth LE, removing the USB cable for hand-held use.
+1. Replace both filters with one quaternion EKF that uses the magnetometer directly and learns all three gyro biases. That removes gimbal lock and the separate yaw filter.
+2. Ellipsoid-fit soft-iron calibration, saved to flash so the 15 s rotation only happens once.
+3. Validate against a reference (motion capture or a rotary stage) and report heading accuracy.
+4. Stream over the C6's Wi-Fi or Bluetooth LE to drop the USB cable.
 
 ## Appendix A: Setup Guide
 
@@ -400,7 +361,7 @@ The menu options in Appendix A need only Python. Running the firmware itself nee
 | `esp32dev` | Original ESP32 DevKit | ICM-20948 | `pio run -e esp32dev -t upload` |
 | `wokwi` | Simulated original ESP32 | MPU6050 (no magnetometer) | `pio run -e wokwi` |
 
-**Real board.** Wire it as in Section 3.2, connect the CH343 USB-C port, run the upload command, then menu option 2 (or `python -m host.live_plot --port auto`). Port names look like `COM3` on Windows, `/dev/cu.usbserial-0001`, `/dev/cu.wchusbserial...` or `/dev/cu.usbmodem...` on macOS (use the `cu.` one), and `/dev/ttyUSB0` or `/dev/ttyACM0` on Linux. If the upload does not start, hold BOOT, tap RST, release BOOT, and upload again.
+**Real board.** Wire it as shown in [Wiring](#wiring), connect the CH343 USB-C port, run the upload command, then menu option 2 (or `python -m host.live_plot --port auto`). Port names look like `COM3` on Windows, `/dev/cu.usbserial-0001`, `/dev/cu.wchusbserial...` or `/dev/cu.usbmodem...` on macOS (use the `cu.` one), and `/dev/ttyUSB0` or `/dev/ttyACM0` on Linux. If the upload does not start, hold BOOT, tap RST, release BOOT, and upload again.
 
 **Status messages at startup**
 
