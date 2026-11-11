@@ -76,6 +76,75 @@ int main() {
   CHECK_NEAR(e2.roll(), 40, 0.05);
   CHECK_NEAR(e2.pitch(), 35, 0.05);
 
+  // ------------------------------------------------------------ heading (yaw)
+  CHECK_NEAR(imu::wrap180(190), -170, 1e-3);
+  CHECK_NEAR(imu::wrap180(-190), 170, 1e-3);
+  CHECK_NEAR(imu::wrap180(45), 45, 1e-3);
+
+  // Level board: heading is the direction of the horizontal field
+  CHECK_NEAR(imu::magHeadingDeg({1.0f, 0.0f, 0.0f}, 0, 0), 0, 1e-3);
+  CHECK_NEAR(imu::magHeadingDeg({0.0f, -1.0f, 0.0f}, 0, 0), 90, 1e-3);
+  CHECK_NEAR(std::fabs(imu::magHeadingDeg({-1.0f, 0.0f, 0.0f}, 0, 0)), 180, 1e-3);  // +/-180 is the same heading
+  // The sign argument flips the direction
+  CHECK_NEAR(imu::magHeadingDeg({0.0f, -1.0f, 0.0f}, 0, 0, -1.0f), -90, 1e-3);
+
+  // Tilt compensation: pitch the board 30 deg. A field pointing at heading 0 (north) reads
+  // as (cos 30, 0, sin 30) in the body frame, and the heading must still come out as 0.
+  const double th = 30 * PI / 180;
+  CHECK_NEAR(imu::magHeadingDeg({(float)std::cos(th), 0.0f, (float)std::sin(th)}, 0, 30), 0, 1e-3);
+  // Roll the board 40 deg with a north field: the field is unchanged along the roll axis
+  CHECK_NEAR(imu::magHeadingDeg({1.0f, 0.0f, 0.0f}, 40, 0), 0, 1e-3);
+
+  // ICM-20948 magnetometer axes -> accelerometer axes: y and z flip, x unchanged
+  {
+    const imu::Vec3 m = imu::ak09916ToImuFrame({10.0f, 20.0f, 30.0f});
+    CHECK_NEAR(m.x, 10, 0);
+    CHECK_NEAR(m.y, -20, 0);
+    CHECK_NEAR(m.z, -30, 0);
+  }
+  // Heading is counterclockwise-positive in the z-up frame: turn the board 90 deg CCW from
+  // north and north ends up on its right (-y), which must read +90.
+  CHECK_NEAR(imu::magHeadingDeg({0.0f, -1.0f, 0.0f}, 0, 0), 90, 1e-3);
+  // Same turn seen by the raw AK09916 (its +y is the board's right): +y raw maps to -y.
+  CHECK_NEAR(imu::magHeadingDeg(imu::ak09916ToImuFrame({0.0f, 1.0f, 0.0f}), 0, 0), 90, 1e-3);
+
+  // ------------------------------------------------------------ yaw filter
+  // Starts from the magnetometer, not zero
+  imu::YawFilter y0(10.0f, 0.01f);
+  y0.update(0.0f, 45.0f, true);
+  CHECK_NEAR(y0.yaw(), 45, 1e-4);
+
+  // Nothing is reported until a magnetometer reading arrives
+  imu::YawFilter yn(10.0f, 0.01f);
+  yn.update(5.0f, 0.0f, false);
+  CHECK_NEAR(yn.initialized() ? 1.0 : 0.0, 0.0, 0);
+
+  // Gyro turns the heading when the magnetometer agrees with the turn
+  imu::YawFilter y1(10.0f, 0.01f);
+  y1.update(0.0f, 0.0f, true);
+  for (int i = 0; i < 300; i++) {  // 10 deg/s for 3 s; the field stays consistent
+    y1.update(10.0f, imu::wrap180(10.0f * 0.01f * (i + 1)), true);
+  }
+  CHECK_NEAR(y1.yaw(), 30, 0.2);
+
+  // Constant gyro bias with a fixed, correct magnetometer: the error settles at tau * bias
+  imu::YawFilter y2(10.0f, 0.01f);
+  y2.update(0.0f, 0.0f, true);
+  for (int i = 0; i < 6000; i++) y2.update(1.0f, 0.0f, true);  // 60 s, bias 1 deg/s
+  CHECK_NEAR(y2.yaw(), 10.0, 0.5);
+
+  // Without magnetometer, the gyro alone drifts: after 60 s at 1 deg/s the heading is 60
+  imu::YawFilter y3(10.0f, 0.01f);
+  y3.update(0.0f, 0.0f, true);
+  for (int i = 0; i < 6000; i++) y3.update(1.0f, 0.0f, false);
+  CHECK_NEAR(y3.yaw(), 60, 0.5);
+
+  // Crossing +/-180 takes the short way round: the heading stays near 180
+  imu::YawFilter yw(10.0f, 0.01f);
+  yw.update(0.0f, 179.0f, true);
+  for (int i = 0; i < 100; i++) yw.update(0.0f, -179.0f, true);
+  CHECK_NEAR(std::fabs(imu::wrap180(yw.yaw() - 180.0f)), 0.0, 2.0);
+
   if (failures == 0) std::printf("All firmware math tests passed\n");
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
